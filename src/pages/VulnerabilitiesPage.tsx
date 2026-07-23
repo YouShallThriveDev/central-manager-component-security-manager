@@ -262,7 +262,14 @@ export default function VulnerabilitiesPage() {
       {/* Stats Row */}
       {vulnStats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-          <div className="rounded-lg border bg-card p-4">
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${statusFilter === "open" && severityFilter === "all" ? "ring-2 ring-red-500" : "hover:bg-muted/50"}`}
+            onClick={() => {
+              const isActive = statusFilter === "open" && severityFilter === "all";
+              setStatusFilter(isActive ? "all" : "open");
+              setSeverityFilter("all");
+            }}
+          >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-red-100 dark:bg-red-900/20">
                 <Bug className="size-4 text-red-600" />
@@ -275,7 +282,14 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           </div>
-          <div className="rounded-lg border bg-card p-4">
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${severityFilter === "critical" ? "ring-2 ring-red-700" : "hover:bg-muted/50"}`}
+            onClick={() => {
+              const isActive = severityFilter === "critical";
+              setSeverityFilter(isActive ? "all" : "critical");
+              if (!isActive) setStatusFilter("open");
+            }}
+          >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-red-100 dark:bg-red-900/20">
                 <ShieldOff className="size-4 text-red-700" />
@@ -288,7 +302,14 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           </div>
-          <div className="rounded-lg border bg-card p-4">
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${severityFilter === "high" ? "ring-2 ring-orange-500" : "hover:bg-muted/50"}`}
+            onClick={() => {
+              const isActive = severityFilter === "high";
+              setSeverityFilter(isActive ? "all" : "high");
+              if (!isActive) setStatusFilter("open");
+            }}
+          >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-orange-100 dark:bg-orange-900/20">
                 <ShieldX className="size-4 text-orange-600" />
@@ -301,7 +322,14 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           </div>
-          <div className="rounded-lg border bg-card p-4">
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${severityFilter === "medium" ? "ring-2 ring-amber-500" : "hover:bg-muted/50"}`}
+            onClick={() => {
+              const isActive = severityFilter === "medium";
+              setSeverityFilter(isActive ? "all" : "medium");
+              if (!isActive) setStatusFilter("open");
+            }}
+          >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-amber-100 dark:bg-amber-900/20">
                 <ShieldAlert className="size-4 text-amber-600" />
@@ -316,7 +344,11 @@ export default function VulnerabilitiesPage() {
           </div>
           <div
             className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${statusFilter === "update_available" ? "ring-2 ring-blue-500" : "hover:bg-muted/50"}`}
-            onClick={() => setStatusFilter(statusFilter === "update_available" ? "open" : "update_available")}
+            onClick={() => {
+              const isActive = statusFilter === "update_available";
+              setStatusFilter(isActive ? "open" : "update_available");
+              setSeverityFilter("all");
+            }}
           >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-blue-100 dark:bg-blue-900/20">
@@ -330,7 +362,14 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           </div>
-          <div className="rounded-lg border bg-card p-4">
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${statusFilter === "patched" ? "ring-2 ring-emerald-500" : "hover:bg-muted/50"}`}
+            onClick={() => {
+              const isActive = statusFilter === "patched";
+              setStatusFilter(isActive ? "all" : "patched");
+              setSeverityFilter("all");
+            }}
+          >
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-emerald-100 dark:bg-emerald-900/20">
                 <CheckCircle2 className="size-4 text-emerald-600" />

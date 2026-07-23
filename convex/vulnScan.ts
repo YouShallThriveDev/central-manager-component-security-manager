@@ -1,8 +1,9 @@
 /**
- * Vulnerability scanning — uses the Wordfence Intelligence API (free, no key needed)
- * to check installed plugins against known vulnerabilities.
+ * Vulnerability scanning — uses the WPVulnerability.net API (free, no key needed)
+ * to check installed plugins against known CVEs.
  *
- * API docs: https://www.wordfence.com/help/wordfence-intelligence-api/
+ * API docs: https://www.wpvulnerability.net/
+ * Migrated from Wordfence Intelligence API v2 (deprecated/removed July 2026).
  */
 import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
@@ -12,119 +13,149 @@ declare const process: { env: Record<string, string | undefined> };
 
 type Severity = "critical" | "high" | "medium" | "low";
 
-interface WorDefenceVuln {
+// ─── WPVulnerability.net response types ──────────────────────
+
+interface WPVulnOperator {
+  min_version: string | null;
+  min_operator: string | null; // "gt", "gte", null
+  max_version: string | null;
+  max_operator: string | null; // "lt", "lte", null
+  unfixed: string; // "0" or "1"
+  closed: string;
+}
+
+interface WPVulnSource {
   id: string;
-  title: string;
-  software: Array<{
-    type: string;
-    slug: string;
-    affected_versions: Record<
-      string,
-      {
-        from_version: string;
-        to_version: string;
-      }
-    >;
-    patched_versions?: string[];
-  }>;
-  cve?: string;
-  cvss?: {
-    score: number;
-    vector: string;
-  };
-  description?: string;
-  references?: string[];
-  published?: string;
+  name: string;
+  link: string;
+  description: string | null;
+  date: string | null;
 }
 
-function cvssToSeverity(score: number): Severity {
-  if (score >= 9.0) return "critical";
-  if (score >= 7.0) return "high";
-  if (score >= 4.0) return "medium";
-  return "low";
+interface WPVulnImpact {
+  cvss?: { score: string; severity: string };
+  cvss3?: { score: string; severity: string };
 }
 
-function isVersionAffected(
-  version: string,
-  from: string,
-  to: string,
-): boolean {
-  const v = version.split(".").map(Number);
-  const f = from === "*" ? null : from.split(".").map(Number);
-  const t = to === "*" ? null : to.split(".").map(Number);
+interface WPVulnEntry {
+  uuid: string;
+  name: string;
+  description: string | null;
+  operator: WPVulnOperator;
+  source: WPVulnSource[];
+  impact?: WPVulnImpact;
+}
 
-  if (f) {
-    for (let i = 0; i < Math.max(v.length, f.length); i++) {
-      const va = v[i] ?? 0;
-      const fa = f[i] ?? 0;
-      if (va < fa) return false;
-      if (va > fa) break;
-    }
+interface WPVulnResponse {
+  error: number;
+  data: {
+    name: string;
+    plugin: string;
+    vulnerability: WPVulnEntry[];
+  } | null;
+}
+
+// ─── Version comparison helpers ──────────────────────────────
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const va = pa[i] ?? 0;
+    const vb = pb[i] ?? 0;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+  }
+  return 0;
+}
+
+function isVersionAffected(version: string, op: WPVulnOperator): boolean {
+  // Check minimum version constraint
+  if (op.min_version) {
+    const cmp = compareVersions(version, op.min_version);
+    if (op.min_operator === "gt" && cmp <= 0) return false;
+    if (op.min_operator === "gte" && cmp < 0) return false;
+    // If no operator specified, treat as >=
+    if (!op.min_operator && cmp < 0) return false;
   }
 
-  if (t) {
-    for (let i = 0; i < Math.max(v.length, t.length); i++) {
-      const va = v[i] ?? 0;
-      const ta = t[i] ?? 0;
-      if (va > ta) return false;
-      if (va < ta) break;
-    }
+  // Check maximum version constraint
+  if (op.max_version) {
+    const cmp = compareVersions(version, op.max_version);
+    if (op.max_operator === "lt" && cmp >= 0) return false;
+    if (op.max_operator === "lte" && cmp > 0) return false;
+    // If no operator specified, treat as <
+    if (!op.max_operator && cmp >= 0) return false;
   }
 
   return true;
 }
 
-// Batch fetch vulnerabilities for multiple plugin slugs from Wordfence Intelligence
-async function fetchWordfenceVulns(
-  slugs: string[],
-): Promise<WorDefenceVuln[]> {
-  const allVulns: WorDefenceVuln[] = [];
+function severityFromImpact(impact?: WPVulnImpact): { severity: Severity; score: number | undefined } {
+  const cvss = impact?.cvss3 || impact?.cvss;
+  if (!cvss) return { severity: "medium", score: undefined };
 
-  // Wordfence Intelligence API — scan endpoint
-  // We query in batches of slugs to be respectful of rate limits
-  for (const slug of slugs) {
-    try {
-      const url = `https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production?software_type=plugin&software_slug=${encodeURIComponent(slug)}`;
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "YST-Security-Manager/1.0" },
-      });
+  const score = parseFloat(cvss.score);
+  if (isNaN(score)) return { severity: "medium", score: undefined };
 
-      if (!resp.ok) {
-        if (resp.status === 429) {
-          // Rate limited — wait and skip this batch
-          console.warn(`Wordfence rate limited on slug ${slug}, skipping`);
-          continue;
-        }
-        continue;
+  let severity: Severity;
+  if (score >= 9.0) severity = "critical";
+  else if (score >= 7.0) severity = "high";
+  else if (score >= 4.0) severity = "medium";
+  else severity = "low";
+
+  return { severity, score };
+}
+
+// ─── Fetch vulnerabilities per slug ──────────────────────────
+
+async function fetchPluginVulns(slug: string): Promise<WPVulnEntry[]> {
+  try {
+    const url = `https://www.wpvulnerability.net/plugin/${encodeURIComponent(slug)}`;
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "YST-Security-Manager/1.0" },
+    });
+
+    if (!resp.ok) {
+      if (resp.status === 429) {
+        console.warn(`WPVulnerability rate limited on slug ${slug}, skipping`);
       }
-
-      const data = (await resp.json()) as Record<string, WorDefenceVuln>;
-
-      // The API returns a map of vuln_id -> vuln object
-      for (const vuln of Object.values(data)) {
-        allVulns.push(vuln);
-      }
-    } catch (e) {
-      console.warn(`Failed to fetch vulns for ${slug}:`, e);
+      return [];
     }
-  }
 
-  return allVulns;
+    const data = (await resp.json()) as WPVulnResponse;
+    if (data.error !== 0 || !data.data?.vulnerability) return [];
+
+    return data.data.vulnerability;
+  } catch (e) {
+    console.warn(`Failed to fetch vulns for ${slug}:`, e);
+    return [];
+  }
 }
 
 // ─── Scan Action ─────────────────────────────────────────────
 
 export const scanAllSites = action({
-  args: {},
+  args: {
+    notify: v.optional(v.boolean()),
+  },
   returns: v.object({
     sitesScanned: v.number(),
     vulnsFound: v.number(),
     newVulns: v.number(),
     errors: v.number(),
   }),
-  handler: async (ctx): Promise<{ sitesScanned: number; vulnsFound: number; newVulns: number; errors: number }> => {
+  handler: async (ctx, args): Promise<{
+    sitesScanned: number;
+    vulnsFound: number;
+    newVulns: number;
+    errors: number;
+  }> => {
     // Get all sites and their plugins
-    const sites: Array<{ _id: string; domain: string }> = await ctx.runQuery(internal.sites.listAll, {}) as any;
+    const sites: Array<{ _id: string; domain: string }> = (await ctx.runQuery(
+      internal.sites.listAll,
+      {},
+    )) as any;
     if (sites.length === 0) {
       return { sitesScanned: 0, vulnsFound: 0, newVulns: 0, errors: 0 };
     }
@@ -158,7 +189,6 @@ export const scanAllSites = action({
       pluginsBySite.set(site._id as string, entries);
     }
 
-    // Fetch vulnerabilities from Wordfence for all unique slugs
     const slugArray = Array.from(allSlugs);
 
     // Update progress
@@ -172,13 +202,25 @@ export const scanAllSites = action({
       }),
     });
 
-    // Scan in batches of 10 to avoid rate limiting
-    const allVulns: WorDefenceVuln[] = [];
-    const batchSize = 10;
+    // Fetch vulnerability data per slug from WPVulnerability.net
+    // Process in batches of 5 concurrently to balance speed vs rate limiting
+    const vulnsBySlug: Map<string, WPVulnEntry[]> = new Map();
+    const batchSize = 5;
+
     for (let i = 0; i < slugArray.length; i += batchSize) {
       const batch = slugArray.slice(i, i + batchSize);
-      const vulns = await fetchWordfenceVulns(batch);
-      allVulns.push(...vulns);
+      const results = await Promise.all(
+        batch.map(async (slug) => ({
+          slug,
+          vulns: await fetchPluginVulns(slug),
+        })),
+      );
+
+      for (const { slug, vulns } of results) {
+        if (vulns.length > 0) {
+          vulnsBySlug.set(slug, vulns);
+        }
+      }
 
       await ctx.runMutation(internal.settings.setInternal, {
         key: "vuln_scan_progress",
@@ -192,7 +234,7 @@ export const scanAllSites = action({
 
       // Small delay between batches
       if (i + batchSize < slugArray.length) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
     }
 
@@ -203,31 +245,55 @@ export const scanAllSites = action({
 
     for (const [siteId, sitePlugins] of pluginsBySite) {
       for (const plugin of sitePlugins) {
-        // Find matching vulnerabilities for this plugin
-        const matchingVulns = allVulns.filter((vuln) => {
-          return vuln.software?.some((sw) => {
-            if (sw.slug !== plugin.slug) return false;
-            // Check if this version is in affected range
-            for (const range of Object.values(sw.affected_versions || {})) {
-              if (
-                isVersionAffected(
-                  plugin.version,
-                  range.from_version,
-                  range.to_version,
-                )
-              ) {
-                return true;
-              }
-            }
-            return false;
-          });
-        });
+        const slugVulns = vulnsBySlug.get(plugin.slug);
+        if (!slugVulns) continue;
+
+        // Filter to vulnerabilities that affect this specific version
+        const matchingVulns = slugVulns.filter((vuln) =>
+          isVersionAffected(plugin.version, vuln.operator),
+        );
 
         for (const vuln of matchingVulns) {
           try {
-            const sw = vuln.software?.find((s) => s.slug === plugin.slug);
-            const fixedIn =
-              sw?.patched_versions?.length ? sw.patched_versions[0] : undefined;
+            // Extract CVE ID from sources
+            const cveSource = vuln.source.find((s) =>
+              s.id.startsWith("CVE-"),
+            );
+            const cveId = cveSource?.id;
+
+            // Get description from the best source
+            const description =
+              cveSource?.description ||
+              vuln.source.find((s) => s.description)?.description ||
+              vuln.description;
+
+            // Get severity and score
+            const { severity, score } = severityFromImpact(vuln.impact);
+
+            // Determine fixed version from operator
+            const fixedInVersion =
+              vuln.operator.unfixed === "0" && vuln.operator.max_version
+                ? vuln.operator.max_version
+                : undefined;
+
+            // Get source URL (prefer Wordfence, then Patchstack, then CVE link)
+            const sourceUrl =
+              vuln.source.find((s) =>
+                s.link.includes("wordfence.com"),
+              )?.link ||
+              vuln.source.find((s) =>
+                s.link.includes("patchstack.com"),
+              )?.link ||
+              cveSource?.link ||
+              vuln.source[0]?.link;
+
+            // Clean up title (decode HTML entities)
+            const title = vuln.name
+              .replace(/&#8211;/g, "–")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&amp;/g, "&")
+              .replace(/&#8217;/g, "'");
 
             const result = await ctx.runMutation(
               internal.vulnerabilities.upsert,
@@ -235,20 +301,16 @@ export const scanAllSites = action({
                 siteId: siteId as any,
                 pluginSlug: plugin.slug,
                 pluginVersion: plugin.version,
-                cveId: vuln.cve || undefined,
-                title: vuln.title || `Vulnerability in ${plugin.slug}`,
-                severity: vuln.cvss
-                  ? cvssToSeverity(vuln.cvss.score)
-                  : "medium",
-                cvssScore: vuln.cvss?.score,
-                description: vuln.description
-                  ? vuln.description.substring(0, 1000)
+                cveId,
+                title: title.substring(0, 200),
+                severity,
+                cvssScore: score,
+                description: description
+                  ? description.substring(0, 1000)
                   : undefined,
-                fixedInVersion: fixedIn,
-                source: "wordfence",
-                sourceUrl: vuln.references?.length
-                  ? vuln.references[0]
-                  : `https://www.wordfence.com/threat-intel/vulnerabilities/id/${vuln.id}`,
+                fixedInVersion,
+                source: "wpvulnerability",
+                sourceUrl,
               },
             );
             vulnsFound++;
@@ -290,6 +352,11 @@ export const scanAllSites = action({
       status: newVulns > 0 ? "error" : "success",
     });
 
+    // If notify=true (e.g. from cron), schedule Slack notification automatically
+    if (args.notify && newVulns > 0) {
+      await ctx.scheduler.runAfter(0, internal.vulnScan.notifySlack, {});
+    }
+
     return { sitesScanned: sites.length, vulnsFound, newVulns, errors };
   },
 });
@@ -312,14 +379,17 @@ export const notifySlack = internalAction({
       cvssScore?: number;
       fixedInVersion?: string;
       slackNotified: boolean;
-    }> = await ctx.runQuery(
+    }> = (await ctx.runQuery(
       internal.vulnerabilities.listUnnotified,
       {},
-    ) as any;
+    )) as any;
     if (unnotified.length === 0) return { notified: 0 };
 
     // Get site domains for context
-    const sites: Array<{ _id: string; domain: string }> = await ctx.runQuery(internal.sites.listAll, {}) as any;
+    const sites: Array<{ _id: string; domain: string }> = (await ctx.runQuery(
+      internal.sites.listAll,
+      {},
+    )) as any;
     const siteDomains: Record<string, string> = {};
     for (const site of sites) {
       siteDomains[site._id] = site.domain;
@@ -371,9 +441,7 @@ export const notifySlack = internalAction({
     }
 
     lines.push("");
-    lines.push(
-      `📊 View all details in Security Manager dashboard`,
-    );
+    lines.push(`📊 View all details in Security Manager dashboard`);
 
     // Send via Viktor Tools
     const apiUrl = process.env.VIKTOR_SPACES_API_URL;

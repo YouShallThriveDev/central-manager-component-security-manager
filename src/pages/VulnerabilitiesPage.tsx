@@ -148,7 +148,7 @@ export default function VulnerabilitiesPage() {
     setScanning(true);
     toast.info("Vulnerability scan started…");
     try {
-      const result = await scanAllSites();
+      const result = await scanAllSites({});
       toast.success(
         `Found ${result.vulnsFound} vulnerabilities (${result.newVulns} new) across ${result.sitesScanned} sites`,
       );

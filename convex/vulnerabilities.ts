@@ -254,6 +254,22 @@ export const markNotified = internalMutation({
   },
 });
 
+export const resetAllNotified = internalMutation({
+  args: {},
+  returns: v.object({ reset: v.number() }),
+  handler: async (ctx) => {
+    let count = 0;
+    const vulns = await ctx.db.query("vulnerabilities").collect();
+    for (const v of vulns) {
+      if (v.slackNotified) {
+        await ctx.db.patch(v._id, { slackNotified: false });
+        count++;
+      }
+    }
+    return { reset: count };
+  },
+});
+
 export const dismiss = internalMutation({
   args: { id: v.id("vulnerabilities") },
   returns: v.null(),

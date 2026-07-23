@@ -169,4 +169,54 @@ http.route({
   }),
 });
 
+// ── Admin endpoint: re-send vulnerability notifications ─────
+http.route({
+  path: "/api/admin/vuln-notify",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    try {
+      const body = await request.json();
+      const secret = process.env.SSO_SHARED_SECRET || "66mTA4FYT1TTYfuD6FC7eDHLN15vZC7T3L6DLz3tqbk";
+      if (!body.adminKey || body.adminKey !== secret) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // Reset all slackNotified flags
+      const resetResult = await ctx.runMutation(internal.vulnerabilities.resetAllNotified, {});
+
+      // Trigger notification
+      await ctx.scheduler.runAfter(0, internal.vulnScan.notifySlack, {});
+
+      return new Response(JSON.stringify({ status: "ok", ...resetResult }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }),
+});
+
+http.route({
+  path: "/api/admin/vuln-notify",
+  method: "OPTIONS",
+  handler: httpAction(async () => {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  }),
+});
+
 export default http;

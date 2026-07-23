@@ -441,7 +441,7 @@ export const notifySlack = internalAction({
     }
 
     lines.push("");
-    lines.push(`📊 View all details in Security Manager dashboard`);
+    lines.push(`📊 <https://security-manager-0bf78f18.viktor.space|View all details in Security Manager dashboard>`);
 
     // Send via Viktor Tools
     const apiUrl = process.env.VIKTOR_SPACES_API_URL;

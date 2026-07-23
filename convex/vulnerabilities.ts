@@ -126,6 +126,7 @@ export const stats = query({
     patched: v.number(),
     dismissed: v.number(),
     affectedSites: v.number(),
+    updateAvailable: v.number(),
   }),
   handler: async (ctx) => {
     const all = await ctx.db.query("vulnerabilities").collect();
@@ -141,6 +142,7 @@ export const stats = query({
       patched: all.filter((v) => v.status === "patched").length,
       dismissed: all.filter((v) => v.status === "dismissed").length,
       affectedSites: siteIds.size,
+      updateAvailable: openVulns.filter((v) => v.fixedInVersion).length,
     };
   },
 });

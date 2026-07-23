@@ -361,6 +361,135 @@ export const scanAllSites = action({
   },
 });
 
+// ─── Single-Site Rescan Action ───────────────────────────────
+
+export const rescanSite = action({
+  args: {
+    siteId: v.id("sites"),
+  },
+  returns: v.object({
+    vulnsFound: v.number(),
+    newVulns: v.number(),
+    resolved: v.number(),
+    pluginsChecked: v.number(),
+  }),
+  handler: async (ctx, args): Promise<{
+    vulnsFound: number;
+    newVulns: number;
+    resolved: number;
+    pluginsChecked: number;
+  }> => {
+    // Get plugins for this site
+    const plugins: Array<{ slug: string; version: string; status: string }> =
+      (await ctx.runQuery(internal.sitePlugins.listAllBySite, {
+        siteId: args.siteId,
+      })) as any;
+
+    const activePlugins = plugins.filter(
+      (p) => p.version && p.status !== "must-use",
+    );
+
+    // Collect unique slugs
+    const slugs: string[] = [...new Set(activePlugins.map((p) => p.slug))];
+
+    // Fetch vulnerability data for each slug
+    const vulnsBySlug: Map<string, WPVulnEntry[]> = new Map();
+    const batchSize = 5;
+
+    for (let i = 0; i < slugs.length; i += batchSize) {
+      const batch = slugs.slice(i, i + batchSize);
+      const results = await Promise.all(
+        batch.map(async (slug: string) => ({
+          slug,
+          vulns: await fetchPluginVulns(slug),
+        })),
+      );
+      for (const { slug, vulns } of results) {
+        if (vulns.length > 0) vulnsBySlug.set(slug, vulns);
+      }
+      if (i + batchSize < slugs.length) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+
+    // Match vulnerabilities to installed plugins
+    let vulnsFound = 0;
+    let newVulns = 0;
+
+    for (const plugin of activePlugins) {
+      const slugVulns = vulnsBySlug.get(plugin.slug);
+      if (!slugVulns) continue;
+
+      const matching = slugVulns.filter((vuln) =>
+        isVersionAffected(plugin.version, vuln.operator),
+      );
+
+      for (const vuln of matching) {
+        try {
+          const cveSource = vuln.source.find((s) => s.id.startsWith("CVE-"));
+          const cveId = cveSource?.id;
+          const description =
+            cveSource?.description ||
+            vuln.source.find((s) => s.description)?.description ||
+            vuln.description;
+          const { severity, score } = severityFromImpact(vuln.impact);
+          const fixedInVersion =
+            vuln.operator.unfixed === "0" && vuln.operator.max_version
+              ? vuln.operator.max_version
+              : undefined;
+          const sourceUrl =
+            vuln.source.find((s) => s.link.includes("wordfence.com"))?.link ||
+            vuln.source.find((s) => s.link.includes("patchstack.com"))?.link ||
+            cveSource?.link ||
+            vuln.source[0]?.link;
+          const title = vuln.name
+            .replace(/&#8211;/g, "–")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&amp;/g, "&")
+            .replace(/&#8217;/g, "'");
+
+          const result = await ctx.runMutation(
+            internal.vulnerabilities.upsert,
+            {
+              siteId: args.siteId,
+              pluginSlug: plugin.slug,
+              pluginVersion: plugin.version,
+              cveId,
+              title: title.substring(0, 200),
+              severity,
+              cvssScore: score,
+              description: description
+                ? description.substring(0, 1000)
+                : undefined,
+              fixedInVersion,
+              source: "wpvulnerability",
+              sourceUrl,
+            },
+          );
+          vulnsFound++;
+          if (result.isNew) newVulns++;
+        } catch (e) {
+          console.error("Rescan upsert error:", e);
+        }
+      }
+    }
+
+    // Auto-resolve patched vulnerabilities for this site
+    const resolveResult: { resolved: number } = await ctx.runMutation(
+      internal.vulnerabilities.autoResolvePatched,
+      { siteId: args.siteId },
+    ) as any;
+
+    return {
+      vulnsFound,
+      newVulns,
+      resolved: resolveResult.resolved,
+      pluginsChecked: slugs.length,
+    };
+  },
+});
+
 // ─── Slack Notification Action ───────────────────────────────
 
 export const notifySlack = internalAction({

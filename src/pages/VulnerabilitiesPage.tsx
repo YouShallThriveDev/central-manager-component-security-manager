@@ -27,6 +27,8 @@ import {
   Info,
   XCircle,
   RotateCcw,
+  ArrowUpCircle,
+  RotateCw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -117,15 +119,22 @@ export default function VulnerabilitiesPage() {
 
   const navigate = useNavigate();
   const vulnStats = useQuery(api.vulnerabilities.stats);
-  const vulns = useQuery(api.vulnerabilities.list, {
+  const queryStatus = statusFilter === "update_available" ? "open" : statusFilter;
+  const rawVulns = useQuery(api.vulnerabilities.list, {
     severity: severityFilter === "all" ? undefined : severityFilter,
-    status: statusFilter === "all" ? undefined : statusFilter,
+    status: queryStatus === "all" ? undefined : queryStatus,
   });
+  // Client-side filter for "update available" (open + has fixedInVersion)
+  const vulns = rawVulns && statusFilter === "update_available"
+    ? rawVulns.filter((v) => v.fixedInVersion)
+    : rawVulns;
   const sites = useQuery(api.sites.list, {});
   const scanAllSites = useAction(api.vulnScan.scanAllSites);
+  const rescanSite = useAction(api.vulnScan.rescanSite);
   const dismissVuln = useMutation(api.vulnerabilities.dismissVuln);
   const reopenVuln = useMutation(api.vulnerabilities.reopenVuln);
   const vulnScanProgress = useQuery(api.settings.getVulnScanProgress);
+  const [recheckingSiteId, setRecheckingSiteId] = useState<string | null>(null);
 
   const isScanningVulns =
     vulnScanProgress?.status === "scanning";
@@ -143,6 +152,27 @@ export default function VulnerabilitiesPage() {
   }, [isDone]);
 
   const [scanning, setScanning] = useState(false);
+
+  const handleRescan = useCallback(async (siteId: string, domain: string) => {
+    setRecheckingSiteId(siteId);
+    toast.info(`Rechecking ${domain}…`);
+    try {
+      const result = await rescanSite({ siteId: siteId as any });
+      if (result.resolved > 0) {
+        toast.success(
+          `${domain}: ${result.resolved} vulnerabilit${result.resolved !== 1 ? "ies" : "y"} resolved! ${result.pluginsChecked} plugins checked.`,
+        );
+      } else {
+        toast.info(
+          `${domain}: ${result.pluginsChecked} plugins checked, ${result.vulnsFound} vulnerabilities found (${result.newVulns} new). No changes in status.`,
+        );
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Recheck failed");
+    } finally {
+      setRecheckingSiteId(null);
+    }
+  }, [rescanSite]);
 
   const handleScan = useCallback(async () => {
     setScanning(true);
@@ -231,7 +261,7 @@ export default function VulnerabilitiesPage() {
 
       {/* Stats Row */}
       {vulnStats && (
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
           <div className="rounded-lg border bg-card p-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-red-100 dark:bg-red-900/20">
@@ -284,6 +314,22 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           </div>
+          <div
+            className={`rounded-lg border bg-card p-4 cursor-pointer transition-colors ${statusFilter === "update_available" ? "ring-2 ring-blue-500" : "hover:bg-muted/50"}`}
+            onClick={() => setStatusFilter(statusFilter === "update_available" ? "open" : "update_available")}
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-md bg-blue-100 dark:bg-blue-900/20">
+                <ArrowUpCircle className="size-4 text-blue-600" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-400">
+                  {vulnStats.updateAvailable}
+                </p>
+                <p className="text-xs text-muted-foreground">Update Available</p>
+              </div>
+            </div>
+          </div>
           <div className="rounded-lg border bg-card p-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-emerald-100 dark:bg-emerald-900/20">
@@ -322,6 +368,7 @@ export default function VulnerabilitiesPage() {
           <SelectContent>
             <SelectItem value="all">All statuses</SelectItem>
             <SelectItem value="open">Open</SelectItem>
+            <SelectItem value="update_available">Update Available</SelectItem>
             <SelectItem value="patched">Patched</SelectItem>
             <SelectItem value="dismissed">Dismissed</SelectItem>
           </SelectContent>
@@ -474,6 +521,24 @@ export default function VulnerabilitiesPage() {
                   </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-2">
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          handleRescan(
+                            vuln.siteId,
+                            siteDomains[vuln.siteId] || "site",
+                          );
+                        }}
+                        disabled={recheckingSiteId === vuln.siteId}
+                        className="text-muted-foreground hover:text-blue-600 disabled:opacity-40"
+                        title="Recheck this site"
+                      >
+                        {recheckingSiteId === vuln.siteId ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <RotateCw className="size-3.5" />
+                        )}
+                      </button>
                       {vuln.sourceUrl && (
                         <a
                           href={vuln.sourceUrl}

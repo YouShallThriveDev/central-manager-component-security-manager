@@ -14,8 +14,16 @@ const ROCKET_API_BASE = "https://api.rocket.net/v1";
 const BATCH_SIZE = 20;
 const CONCURRENCY = 5;
 
+// Retry once on 401 — Rocket.net occasionally returns a transient 401 mid-sync.
+async function rocketFetch(url: string, init: RequestInit): Promise<Response> {
+  const resp = await fetch(url, init);
+  if (resp.status !== 401) return resp;
+  await new Promise((r) => setTimeout(r, 1500));
+  return await fetch(url, init);
+}
+
 async function fetchPhpVersion(token: string, rocketSiteId: number): Promise<string | undefined> {
-  const resp = await fetch(`${ROCKET_API_BASE}/sites/${rocketSiteId}/settings`, {
+  const resp = await rocketFetch(`${ROCKET_API_BASE}/sites/${rocketSiteId}/settings`, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
@@ -25,7 +33,7 @@ async function fetchPhpVersion(token: string, rocketSiteId: number): Promise<str
 
   if (!resp.ok) {
     if (resp.status === 401) {
-      throw new Error("Rocket.net API token is invalid or expired. Go to Servers to update it.");
+      throw new Error(`Sync error (401 from Rocket.net) fetching settings for site ${rocketSiteId}. Check the sync logs for details.`);
     }
     throw new Error(`Rocket.net API error (${resp.status}) fetching settings for site ${rocketSiteId}`);
   }

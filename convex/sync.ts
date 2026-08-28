@@ -560,9 +560,9 @@ async function doFullSync(
       }
     }
 
-    // Clean stale entries
+    // Flag entries missing from Rocket.net (records are never auto-deleted)
     const validIds = siteIds.map((s) => s.rocketSiteId);
-    await ctx.runMutation(internal.sites.deleteStaleSites, {
+    await ctx.runMutation(internal.sites.flagMissingSites, {
       validSiteIds: validIds,
       accountId: accountId as any,
     });
@@ -696,7 +696,7 @@ export const syncSitesOnly = action({
         }
 
         const validIds = productionSites.map((s) => s.id as number);
-        await ctx.runMutation(internal.sites.deleteStaleSites, {
+        await ctx.runMutation(internal.sites.flagMissingSites, {
           validSiteIds: validIds,
           accountId: account._id as any,
         });

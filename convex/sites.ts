@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { query, internalMutation, internalQuery } from "./_generated/server";
+import { query, internalMutation, internalQuery, mutation } from "./_generated/server";
 
 const gradeValidator = v.optional(
   v.union(
@@ -216,13 +216,15 @@ export const listAll = internalQuery({
   },
 });
 
-export const deleteStaleSites = internalMutation({
+export const flagMissingSites = internalMutation({
   args: {
     validSiteIds: v.array(v.number()),
     accountId: v.optional(v.id("rocketAccounts")),
   },
-  returns: v.object({ deleted: v.number() }),
+  returns: v.object({ flagged: v.number(), cleared: v.number() }),
   handler: async (ctx, args) => {
+    // Sites missing from Rocket.net are flagged, never deleted — removing a
+    // record is a human decision.
     const validSet = new Set(args.validSiteIds);
 
     let allSites;
@@ -235,26 +237,52 @@ export const deleteStaleSites = internalMutation({
       allSites = await ctx.db.query("sites").collect();
     }
 
-    let deleted = 0;
+    let flagged = 0;
+    let cleared = 0;
     for (const site of allSites) {
       if (!validSet.has(site.rocketSiteId)) {
-        const plugins = await ctx.db
-          .query("sitePlugins")
-          .withIndex("by_site", (q) => q.eq("siteId", site._id))
-          .collect();
-        for (const p of plugins) await ctx.db.delete(p._id);
-
-        const muPlugins = await ctx.db
-          .query("siteMuPlugins")
-          .withIndex("by_site", (q) => q.eq("siteId", site._id))
-          .collect();
-        for (const m of muPlugins) await ctx.db.delete(m._id);
-
-        await ctx.db.delete(site._id);
-        deleted++;
+        if (site.rocketStatus !== "missing") {
+          await ctx.db.patch(site._id, {
+            rocketStatus: "missing",
+            rocketMissingSince: site.rocketMissingSince ?? Date.now(),
+          });
+        }
+        flagged++;
+      } else if (site.rocketStatus === "missing") {
+        await ctx.db.patch(site._id, { rocketStatus: "ok", rocketMissingSince: undefined });
+        cleared++;
       }
     }
 
-    return { deleted };
+    return { flagged, cleared };
+  },
+});
+
+
+/**
+ * Human-initiated removal of a site record. Sync never deletes records — a
+ * site missing from Rocket.net is flagged and stays visible until someone
+ * explicitly removes it here.
+ */
+export const removeSite = mutation({
+  args: { siteId: v.id("sites") },
+  returns: v.null(),
+  handler: async (ctx, { siteId }) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+
+    const plugins = await ctx.db
+      .query("sitePlugins")
+      .withIndex("by_site", (q) => q.eq("siteId", siteId))
+      .collect();
+    for (const p of plugins) await ctx.db.delete(p._id);
+
+    const muPlugins = await ctx.db
+      .query("siteMuPlugins")
+      .withIndex("by_site", (q) => q.eq("siteId", siteId))
+      .collect();
+    for (const m of muPlugins) await ctx.db.delete(m._id);
+    await ctx.db.delete(siteId);
+    return null;
   },
 });

@@ -1,6 +1,8 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { PhpVersionBadge } from "@/components/PhpVersionBadge";
+import { RocketStatusBadge } from "@/components/RocketStatusBadge";
+import { MissingFromRocketNotice } from "@/components/MissingFromRocketNotice";
 import { useParams, Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -143,11 +145,19 @@ export default function SiteDetailPage() {
         </Button>
       </div>
 
+      <MissingFromRocketNotice
+        siteId={site._id}
+        status={site.rocketStatus}
+        missingSince={site.rocketMissingSince}
+        domain={site.domain}
+      />
+
       <div className="flex items-start justify-between">
         <div className="space-y-1">
           <h1 className="text-2xl font-bold tracking-tight">{site.domain}</h1>
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <PhpVersionBadge version={site.phpVersion} checkedAt={site.phpCheckedAt} />
+            <RocketStatusBadge status={site.rocketStatus} missingSince={site.rocketMissingSince} />
             {site.wpVersion && <span>WP {site.wpVersion}</span>}
             {site.rocketUrl && (
               <a

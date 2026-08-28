@@ -36,6 +36,7 @@ import {
 import { toast } from "sonner";
 import type { Doc } from "../../convex/_generated/dataModel";
 import { PhpVersionBadge, phpSortValue, matchesPhpFilter, PHP_FILTER_OPTIONS, PHP_FILTER_ALL_LABEL } from "@/components/PhpVersionBadge";
+import { RocketStatusBadge, matchesRocketFilter, ROCKET_FILTER_OPTIONS, ROCKET_FILTER_ALL_LABEL } from "@/components/RocketStatusBadge";
 
 type GradeType = "A" | "B" | "C" | "D" | "F";
 
@@ -111,7 +112,13 @@ function SiteRow({ site, onClick }: { site: SiteDoc; onClick: () => void }) {
     >
       <td className="py-3 px-4">
         <div className="flex flex-col gap-0.5">
-          <span className="font-medium text-sm">{site.domain}</span>
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-sm">{site.domain}</span>
+            <RocketStatusBadge
+              status={site.rocketStatus}
+              missingSince={site.rocketMissingSince}
+            />
+          </div>
           <span className="text-xs text-muted-foreground">
             {site.wpVersion ? `WP ${site.wpVersion}` : ""}
           </span>
@@ -199,6 +206,7 @@ export default function DashboardPage() {
   const [accountFilter, setAccountFilter] = useState<string>("all");
   const [phpSort, setPhpSort] = useState<"none" | "asc" | "desc">("none");
   const [phpFilter, setPhpFilter] = useState<string>("all");
+  const [rocketFilter, setRocketFilter] = useState<string>("all");
 
   const navigate = useNavigate();
 
@@ -220,6 +228,9 @@ export default function DashboardPage() {
     let list = [...sites];
     if (phpFilter !== "all") {
       list = list.filter((s) => matchesPhpFilter(s.phpVersion, phpFilter));
+    }
+    if (rocketFilter !== "all") {
+      list = list.filter((s) => matchesRocketFilter(s.rocketStatus, rocketFilter));
     }
     if (phpSort !== "none") {
       list.sort((a, b) => {
@@ -449,6 +460,17 @@ export default function DashboardPage() {
           <SelectContent>
             <SelectItem value="all">{PHP_FILTER_ALL_LABEL}</SelectItem>
             {PHP_FILTER_OPTIONS.map((o) => (
+              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={rocketFilter} onValueChange={setRocketFilter}>
+          <SelectTrigger className="w-[210px]">
+            <SelectValue placeholder="Rocket.net status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{ROCKET_FILTER_ALL_LABEL}</SelectItem>
+            {ROCKET_FILTER_OPTIONS.map((o) => (
               <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
             ))}
           </SelectContent>

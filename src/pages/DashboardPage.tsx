@@ -295,7 +295,7 @@ export default function DashboardPage() {
           ) : (
             <RefreshCw className="size-4" />
           )}
-          {isSyncing ? "Scanning..." : "Scan All Sites"}
+          {isSyncing ? "Syncing..." : "Sync"}
         </Button>
         </div>
       </div>
@@ -497,7 +497,7 @@ export default function DashboardPage() {
                     <p className="text-sm text-muted-foreground">
                       {search || gradeFilter !== "all"
                         ? "No sites match your filters"
-                        : "No sites yet. Click \"Scan All Sites\" to pull data from Rocket.net."}
+                        : "No sites yet. Click \"Sync\" to pull data from Rocket.net."}
                     </p>
                   </div>
                 </td>

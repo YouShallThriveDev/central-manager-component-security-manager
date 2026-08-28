@@ -35,7 +35,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { Doc } from "../../convex/_generated/dataModel";
-import { PhpVersionBadge, phpSortValue } from "@/components/PhpVersionBadge";
+import { PhpVersionBadge, phpSortValue, matchesPhpFilter, PHP_FILTER_OPTIONS, PHP_FILTER_ALL_LABEL } from "@/components/PhpVersionBadge";
 
 type GradeType = "A" | "B" | "C" | "D" | "F";
 
@@ -221,15 +221,7 @@ export default function DashboardPage() {
     if (!sites) return sites;
     let list = [...sites];
     if (phpFilter !== "all") {
-      list = list.filter((s) => {
-        const num = s.phpVersion ? parseFloat(s.phpVersion) : NaN;
-        if (phpFilter === "unknown") return !s.phpVersion;
-        if (Number.isNaN(num)) return false;
-        if (phpFilter === "ok") return num >= 8.1;
-        if (phpFilter === "warning") return num >= 8.0 && num < 8.1;
-        if (phpFilter === "critical") return num < 8.0;
-        return true;
-      });
+      list = list.filter((s) => matchesPhpFilter(s.phpVersion, phpFilter));
     }
     if (phpSort !== "none") {
       list.sort((a, b) => {
@@ -465,11 +457,10 @@ export default function DashboardPage() {
             <SelectValue placeholder="PHP version" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All PHP versions</SelectItem>
-            <SelectItem value="ok">PHP 8.1+</SelectItem>
-            <SelectItem value="warning">PHP 8.0</SelectItem>
-            <SelectItem value="critical">PHP 7.4 and older</SelectItem>
-            <SelectItem value="unknown">Not synced</SelectItem>
+            <SelectItem value="all">{PHP_FILTER_ALL_LABEL}</SelectItem>
+            {PHP_FILTER_OPTIONS.map((o) => (
+              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Select value={gradeFilter} onValueChange={setGradeFilter}>

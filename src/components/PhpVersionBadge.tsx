@@ -59,3 +59,19 @@ export function PhpVersionBadge({
     </Badge>
   );
 }
+
+/** Standard PHP filter dropdown options — keep identical across all suite apps. */
+export const PHP_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: "ok", label: "PHP 8.1+" },
+  { value: "warning", label: "PHP 8.0" },
+  { value: "critical", label: "PHP 7.4 and older" },
+  { value: "unknown", label: "Not synced" },
+];
+
+export const PHP_FILTER_ALL_LABEL = "All PHP versions";
+
+/** True when a site's PHP version passes the selected filter value. */
+export function matchesPhpFilter(version: string | undefined, filter: string): boolean {
+  if (filter === "all") return true;
+  return phpTier(version) === filter;
+}

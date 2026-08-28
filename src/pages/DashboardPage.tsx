@@ -214,8 +214,6 @@ export default function DashboardPage() {
   const hasAccounts = useQuery(api.rocketAccounts.hasAny);
   const syncProgress = useQuery(api.settings.getSyncProgress);
   const phpSummary = useQuery(api.phpVersions.summary);
-  const syncPhpVersions = useAction(api.phpVersions.syncAll);
-  const [phpSyncing, setPhpSyncing] = useState(false);
 
   const visibleSites = (() => {
     if (!sites) return sites;
@@ -231,18 +229,6 @@ export default function DashboardPage() {
     }
     return list;
   })();
-
-  const handlePhpSync = useCallback(async () => {
-    setPhpSyncing(true);
-    try {
-      const res = await syncPhpVersions({});
-      toast.info(`Checking PHP versions on ${res.sites} sites — this runs in the background.`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "PHP version sync failed");
-    } finally {
-      setPhpSyncing(false);
-    }
-  }, [syncPhpVersions]);
 
   const isSyncing = syncProgress?.status === "syncing";
   const isDone = syncProgress?.status === "done";
@@ -298,15 +284,6 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-        <Button
-          onClick={handlePhpSync}
-          disabled={phpSyncing}
-          variant="outline"
-          className="gap-2"
-        >
-          {phpSyncing ? <Loader2 className="size-4 animate-spin" /> : <Cpu className="size-4" />}
-          Sync PHP
-        </Button>
         <Button
           onClick={handleSync}
           disabled={isSyncing || hasAccounts === undefined}
@@ -412,7 +389,7 @@ export default function DashboardPage() {
               {phpSummary.unknown > 0 && `${phpSummary.unknown} not synced · `}
               {phpSummary.lastCheckedAt
                 ? `checked ${new Date(phpSummary.lastCheckedAt).toLocaleString()}`
-                : "never checked — click Sync PHP"}
+                : "never checked — runs with the next Sync"}
             </span>
           </div>
           {phpSummary.byVersion.length > 0 && (

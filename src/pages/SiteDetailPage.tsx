@@ -1,5 +1,6 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
+import { PhpVersionBadge } from "@/components/PhpVersionBadge";
 import { useParams, Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -146,7 +147,7 @@ export default function SiteDetailPage() {
         <div className="space-y-1">
           <h1 className="text-2xl font-bold tracking-tight">{site.domain}</h1>
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
-            {site.phpVersion && <span>PHP {site.phpVersion}</span>}
+            <PhpVersionBadge version={site.phpVersion} checkedAt={site.phpCheckedAt} />
             {site.wpVersion && <span>WP {site.wpVersion}</span>}
             {site.rocketUrl && (
               <a

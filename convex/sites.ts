@@ -19,6 +19,7 @@ const siteReturnValidator = v.object({
   domain: v.string(),
   rocketUrl: v.optional(v.string()),
   phpVersion: v.optional(v.string()),
+  phpCheckedAt: v.optional(v.number()),
   wpVersion: v.optional(v.string()),
   wpUpdateAvailable: v.optional(v.boolean()),
   sslEnabled: v.optional(v.boolean()),

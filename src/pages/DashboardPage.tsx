@@ -31,9 +31,11 @@ import {
   HardDrive,
   KeyRound,
   Lock,
+  Cpu,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { Doc } from "../../convex/_generated/dataModel";
+import { PhpVersionBadge, phpSortValue } from "@/components/PhpVersionBadge";
 
 type GradeType = "A" | "B" | "C" | "D" | "F";
 
@@ -111,11 +113,12 @@ function SiteRow({ site, onClick }: { site: SiteDoc; onClick: () => void }) {
         <div className="flex flex-col gap-0.5">
           <span className="font-medium text-sm">{site.domain}</span>
           <span className="text-xs text-muted-foreground">
-            {site.phpVersion && `PHP ${site.phpVersion}`}
-            {site.phpVersion && site.wpVersion && " · "}
-            {site.wpVersion && `WP ${site.wpVersion}`}
+            {site.wpVersion ? `WP ${site.wpVersion}` : ""}
           </span>
         </div>
+      </td>
+      <td className="py-3 px-4">
+        <PhpVersionBadge version={site.phpVersion} checkedAt={site.phpCheckedAt} />
       </td>
       <td className="py-3 px-4">
         <GradeBadge grade={site.securityGrade as GradeType | undefined} />
@@ -194,6 +197,8 @@ export default function DashboardPage() {
   const [search, setSearch] = useState("");
   const [gradeFilter, setGradeFilter] = useState<string>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
+  const [phpSort, setPhpSort] = useState<"none" | "asc" | "desc">("none");
+  const [phpFilter, setPhpFilter] = useState<string>("all");
 
   const navigate = useNavigate();
 
@@ -208,6 +213,44 @@ export default function DashboardPage() {
   const syncEverything = useAction(api.sync.syncEverything);
   const hasAccounts = useQuery(api.rocketAccounts.hasAny);
   const syncProgress = useQuery(api.settings.getSyncProgress);
+  const phpSummary = useQuery(api.phpVersions.summary);
+  const syncPhpVersions = useAction(api.phpVersions.syncAll);
+  const [phpSyncing, setPhpSyncing] = useState(false);
+
+  const visibleSites = (() => {
+    if (!sites) return sites;
+    let list = [...sites];
+    if (phpFilter !== "all") {
+      list = list.filter((s) => {
+        const num = s.phpVersion ? parseFloat(s.phpVersion) : NaN;
+        if (phpFilter === "unknown") return !s.phpVersion;
+        if (Number.isNaN(num)) return false;
+        if (phpFilter === "ok") return num >= 8.1;
+        if (phpFilter === "warning") return num >= 8.0 && num < 8.1;
+        if (phpFilter === "critical") return num < 8.0;
+        return true;
+      });
+    }
+    if (phpSort !== "none") {
+      list.sort((a, b) => {
+        const diff = phpSortValue(a.phpVersion) - phpSortValue(b.phpVersion);
+        return phpSort === "asc" ? diff : -diff;
+      });
+    }
+    return list;
+  })();
+
+  const handlePhpSync = useCallback(async () => {
+    setPhpSyncing(true);
+    try {
+      const res = await syncPhpVersions({});
+      toast.info(`Checking PHP versions on ${res.sites} sites — this runs in the background.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "PHP version sync failed");
+    } finally {
+      setPhpSyncing(false);
+    }
+  }, [syncPhpVersions]);
 
   const isSyncing = syncProgress?.status === "syncing";
   const isDone = syncProgress?.status === "done";
@@ -262,6 +305,16 @@ export default function DashboardPage() {
             Monitor security posture across all production sites
           </p>
         </div>
+        <div className="flex items-center gap-2">
+        <Button
+          onClick={handlePhpSync}
+          disabled={phpSyncing}
+          variant="outline"
+          className="gap-2"
+        >
+          {phpSyncing ? <Loader2 className="size-4 animate-spin" /> : <Cpu className="size-4" />}
+          Sync PHP
+        </Button>
         <Button
           onClick={handleSync}
           disabled={isSyncing || hasAccounts === undefined}
@@ -275,6 +328,7 @@ export default function DashboardPage() {
           )}
           {isSyncing ? "Scanning..." : "Scan All Sites"}
         </Button>
+        </div>
       </div>
 
       {/* Sync Progress */}
@@ -348,6 +402,40 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {/* PHP Version Summary */}
+      {phpSummary && phpSummary.total > 0 && (
+        <div className="rounded-lg border bg-card p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Cpu className="size-4 text-muted-foreground" />
+              <span className="text-sm font-medium">PHP versions</span>
+              {phpSummary.critical > 0 && (
+                <Badge variant="outline" className="text-xs border-red-300 text-red-700 bg-red-50 dark:bg-red-950/30 gap-1">
+                  <AlertTriangle className="size-3" />
+                  {phpSummary.critical} end-of-life
+                </Badge>
+              )}
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {phpSummary.unknown > 0 && `${phpSummary.unknown} not synced · `}
+              {phpSummary.lastCheckedAt
+                ? `checked ${new Date(phpSummary.lastCheckedAt).toLocaleString()}`
+                : "never checked — click Sync PHP"}
+            </span>
+          </div>
+          {phpSummary.byVersion.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              {phpSummary.byVersion.map((row) => (
+                <div key={row.version} className="flex items-center gap-1.5">
+                  <PhpVersionBadge version={row.version} />
+                  <span className="text-xs tabular-nums text-muted-foreground">×{row.count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex items-center gap-3">
         <div className="relative flex-1 max-w-sm">
@@ -372,6 +460,18 @@ export default function DashboardPage() {
             </SelectContent>
           </Select>
         )}
+        <Select value={phpFilter} onValueChange={setPhpFilter}>
+          <SelectTrigger className="w-[170px]">
+            <SelectValue placeholder="PHP version" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All PHP versions</SelectItem>
+            <SelectItem value="ok">PHP 8.1+</SelectItem>
+            <SelectItem value="warning">PHP 8.0</SelectItem>
+            <SelectItem value="critical">PHP 7.4 and older</SelectItem>
+            <SelectItem value="unknown">Not synced</SelectItem>
+          </SelectContent>
+        </Select>
         <Select value={gradeFilter} onValueChange={setGradeFilter}>
           <SelectTrigger className="w-[160px]">
             <SelectValue placeholder="Grade" />
@@ -385,9 +485,9 @@ export default function DashboardPage() {
             <SelectItem value="F">Grade F</SelectItem>
           </SelectContent>
         </Select>
-        {sites && (
+        {visibleSites && (
           <span className="text-sm text-muted-foreground tabular-nums">
-            {sites.length} site{sites.length !== 1 ? "s" : ""}
+            {visibleSites.length} site{visibleSites.length !== 1 ? "s" : ""}
           </span>
         )}
       </div>
@@ -398,6 +498,16 @@ export default function DashboardPage() {
           <thead>
             <tr className="border-b bg-muted/30">
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Domain</th>
+              <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                <button
+                  type="button"
+                  onClick={() => setPhpSort((s) => (s === "none" ? "asc" : s === "asc" ? "desc" : "none"))}
+                  className="uppercase tracking-wider hover:text-foreground transition-colors"
+                  title="Sort by PHP version"
+                >
+                  PHP {phpSort === "asc" ? "\u2191" : phpSort === "desc" ? "\u2193" : ""}
+                </button>
+              </th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Grade</th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Score</th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Security Features</th>
@@ -407,13 +517,13 @@ export default function DashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {sites === undefined ? (
+            {visibleSites === undefined ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center text-muted-foreground">Loading...</td>
+                <td colSpan={8} className="py-12 text-center text-muted-foreground">Loading...</td>
               </tr>
-            ) : sites.length === 0 ? (
+            ) : visibleSites.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center">
+                <td colSpan={8} className="py-12 text-center">
                   <div className="flex flex-col items-center gap-2">
                     <Shield className="size-8 text-muted-foreground/50" />
                     <p className="text-sm text-muted-foreground">
@@ -425,7 +535,7 @@ export default function DashboardPage() {
                 </td>
               </tr>
             ) : (
-              sites.map((site) => (
+              visibleSites.map((site) => (
                 <SiteRow
                   key={site._id}
                   site={site}

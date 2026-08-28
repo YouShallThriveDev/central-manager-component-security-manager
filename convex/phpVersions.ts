@@ -33,6 +33,7 @@ async function probeSite(
   token: string,
   rocketSiteId: number,
 ): Promise<{ status: RocketStatus; version?: string }> {
+  if (!rocketSiteId || rocketSiteId <= 0) return { status: "missing" };
   const resp = await rocketFetch(`${ROCKET_API_BASE}/sites/${rocketSiteId}/settings`, {
     headers: {
       Authorization: `Bearer ${token}`,

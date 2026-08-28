@@ -452,17 +452,6 @@ export default function DashboardPage() {
             </SelectContent>
           </Select>
         )}
-        <Select value={phpFilter} onValueChange={setPhpFilter}>
-          <SelectTrigger className="w-[170px]">
-            <SelectValue placeholder="PHP version" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{PHP_FILTER_ALL_LABEL}</SelectItem>
-            {PHP_FILTER_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         <Select value={gradeFilter} onValueChange={setGradeFilter}>
           <SelectTrigger className="w-[160px]">
             <SelectValue placeholder="Grade" />
@@ -474,6 +463,17 @@ export default function DashboardPage() {
             <SelectItem value="C">Grade C</SelectItem>
             <SelectItem value="D">Grade D</SelectItem>
             <SelectItem value="F">Grade F</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={phpFilter} onValueChange={setPhpFilter}>
+          <SelectTrigger className="w-[170px]">
+            <SelectValue placeholder="PHP version" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{PHP_FILTER_ALL_LABEL}</SelectItem>
+            {PHP_FILTER_OPTIONS.map((o) => (
+              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
         {visibleSites && (

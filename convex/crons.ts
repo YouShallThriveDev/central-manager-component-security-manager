@@ -6,7 +6,7 @@
  *   and sends Slack alerts for any new findings.
  */
 import { cronJobs } from "convex/server";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 
 const crons = cronJobs();
 
@@ -17,6 +17,15 @@ crons.daily(
   { hourUTC: 6, minuteUTC: 0 },
   api.vulnScan.scanAllSites,
   { notify: true },
+);
+
+// Daily PHP version sweep — keeps phpVersion/phpCheckedAt fresh without
+// anyone clicking Sync. Staggered across the suite to spread Rocket.net load.
+crons.daily(
+  "daily-php-sweep",
+  { hourUTC: 10, minuteUTC: 0 },
+  internal.phpVersions.syncBatch,
+  { offset: 0 },
 );
 
 export default crons;

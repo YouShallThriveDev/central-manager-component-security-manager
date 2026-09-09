@@ -39,6 +39,8 @@ const siteReturnValidator = v.object({
   wordfenceVersion: v.optional(v.string()),
   lastScanAt: v.optional(v.number()),
   lastScanResult: v.optional(v.string()),
+  rocketStatus: v.optional(v.string()),
+  rocketMissingSince: v.optional(v.number()),
 });
 
 export const list = query({

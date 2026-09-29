@@ -1,6 +1,6 @@
 import { v } from "convex/values";
-import { internalMutation, MutationCtx } from "./_generated/server";
-import { Id } from "./_generated/dataModel";
+import { internalMutation, type MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 
 export type Grade = "A" | "B" | "C" | "D" | "F";
 type Severity = "critical" | "high" | "medium" | "low";

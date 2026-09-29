@@ -1,3 +1,4 @@
+import { calculateSecurityScore } from "./securityScore";
 /**
  * Sync actions — pull production site data from Rocket.net API and
  * analyze security posture.
@@ -97,73 +98,6 @@ function getSecurityCategory(
 // isSecurityPlugin is used via the SECURITY_PLUGINS map directly
 
 // ─── Security Scoring ─────────────────────────────────────────
-
-function calculateSecurityScore(features: {
-  hasFirewall: boolean;
-  hasMalwareScanner: boolean;
-  hasBackup: boolean;
-  hasTwoFactor: boolean;
-  hasBruteForceProtection: boolean;
-  pluginsNeedingUpdate: number;
-  totalPlugins: number;
-  sslEnabled: boolean;
-  wordfenceActive: boolean;
-  wordfenceInstalled: boolean;
-}): { score: number; grade: "A" | "B" | "C" | "D" | "F" } {
-  let score = 0;
-
-  // Firewall / WAF (25 points)
-  if (features.hasFirewall) score += 25;
-
-  // Malware scanning (15 points) — independent of firewall
-  if (features.hasMalwareScanner) score += 15;
-
-  // Backup (15 points)
-  if (features.hasBackup) score += 15;
-
-  // Two-factor auth (10 points)
-  if (features.hasTwoFactor) score += 10;
-
-  // Brute force protection (5 points) — independent of firewall
-  if (features.hasBruteForceProtection) score += 5;
-
-  // SSL (10 points)
-  if (features.sslEnabled) score += 10;
-
-  // Wordfence configuration bonus (5 points)
-  // Installed but inactive = penalty; active = bonus
-  if (features.wordfenceActive) {
-    score += 5;
-  } else if (features.wordfenceInstalled) {
-    // Installed but inactive — slight penalty (could mean misconfigured)
-    score -= 3;
-  }
-
-  // Plugin currency (15 points, reduced by outdated plugins)
-  if (features.totalPlugins > 0) {
-    const updateRatio = features.pluginsNeedingUpdate / features.totalPlugins;
-    if (updateRatio === 0) score += 15;
-    else if (updateRatio < 0.05) score += 12;
-    else if (updateRatio < 0.1) score += 8;
-    else if (updateRatio < 0.25) score += 4;
-    else score += 0;
-  } else {
-    score += 15;
-  }
-
-  // Clamp to 0-100
-  score = Math.max(0, Math.min(100, score));
-
-  // Grade
-  let grade: "A" | "B" | "C" | "D" | "F";
-  if (score >= 85) grade = "A";
-  else if (score >= 70) grade = "B";
-  else if (score >= 50) grade = "C";
-  else if (score >= 30) grade = "D";
-  else grade = "F";
-
-  return { score, grade };
-}
 
 // ─── Rocket.net API Helpers ───────────────────────────────────
 
@@ -390,7 +324,7 @@ async function scanSiteSecurity(
     sslEnabled,
     wordfenceActive,
     wordfenceInstalled,
-  });
+  }, { critical: 0, high: 0, medium: 0, low: 0 });
 
   // Save plugin data
   await ctx.runMutation(internal.sitePlugins.batchUpsert, {

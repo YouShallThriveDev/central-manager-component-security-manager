@@ -1,3 +1,4 @@
+import { recalcSiteScore } from "./securityScore";
 /**
  * Vulnerability alerts — queries, mutations, and scanning actions.
  * Uses the free Wordfence Intelligence API to check for known plugin vulnerabilities.
@@ -205,6 +206,7 @@ export const upsert = internalMutation({
         source: args.source,
         sourceUrl: args.sourceUrl,
       });
+      await recalcSiteScore(ctx, args.siteId);
       return { id: match._id, isNew: false };
     }
 
@@ -225,6 +227,7 @@ export const upsert = internalMutation({
       firstDetectedAt: Date.now(),
       slackNotified: false,
     });
+    await recalcSiteScore(ctx, args.siteId);
     return { id, isNew: true };
   },
 });
@@ -241,6 +244,8 @@ export const updateStatus = internalMutation({
       patch.resolvedAt = Date.now();
     }
     await ctx.db.patch(args.id, patch);
+    const vuln = await ctx.db.get(args.id);
+    if (vuln) await recalcSiteScore(ctx, vuln.siteId);
     return null;
   },
 });
@@ -280,6 +285,8 @@ export const dismiss = internalMutation({
       status: "dismissed",
       resolvedAt: Date.now(),
     });
+    const vuln = await ctx.db.get(args.id);
+    if (vuln) await recalcSiteScore(ctx, vuln.siteId);
     return null;
   },
 });
@@ -295,6 +302,8 @@ export const dismissVuln = mutation({
       status: "dismissed",
       resolvedAt: Date.now(),
     });
+    const vuln = await ctx.db.get(args.id);
+    if (vuln) await recalcSiteScore(ctx, vuln.siteId);
     return null;
   },
 });
@@ -310,6 +319,8 @@ export const reopenVuln = mutation({
       status: "open",
       resolvedAt: undefined,
     });
+    const vuln = await ctx.db.get(args.id);
+    if (vuln) await recalcSiteScore(ctx, vuln.siteId);
     return null;
   },
 });
@@ -356,6 +367,7 @@ export const autoResolvePatched = internalMutation({
         }
       }
     }
+    if (resolved > 0) await recalcSiteScore(ctx, args.siteId);
     return { resolved };
   },
 });

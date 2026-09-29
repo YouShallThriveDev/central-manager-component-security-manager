@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { recalcSiteScore } from "./securityScore";
 import { query, internalMutation, internalQuery, mutation } from "./_generated/server";
 
 const gradeValidator = v.optional(
@@ -26,6 +27,13 @@ const siteReturnValidator = v.object({
   lastSyncedAt: v.optional(v.number()),
   securityScore: v.optional(v.number()),
   securityGrade: gradeValidator,
+  securityBaseScore: v.optional(v.number()),
+  vulnPenalty: v.optional(v.number()),
+  vulnGradeCap: v.optional(v.string()),
+  openVulnCritical: v.optional(v.number()),
+  openVulnHigh: v.optional(v.number()),
+  openVulnMedium: v.optional(v.number()),
+  openVulnLow: v.optional(v.number()),
   activeSecurityPlugins: v.optional(v.number()),
   totalPlugins: v.optional(v.number()),
   pluginsNeedingUpdate: v.optional(v.number()),
@@ -181,10 +189,11 @@ export const upsert = internalMutation({
       if (args.wordfenceVersion !== undefined) patch.wordfenceVersion = args.wordfenceVersion;
 
       await ctx.db.patch(existing._id, patch);
+      await recalcSiteScore(ctx, existing._id);
       return existing._id;
     }
 
-    return await ctx.db.insert("sites", {
+    const id = await ctx.db.insert("sites", {
       accountId: args.accountId,
       rocketSiteId: args.rocketSiteId,
       domain: args.domain,
@@ -208,6 +217,8 @@ export const upsert = internalMutation({
       wordfenceVersion: args.wordfenceVersion,
       lastSyncedAt: now,
     });
+    await recalcSiteScore(ctx, id);
+    return id;
   },
 });
 

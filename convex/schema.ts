@@ -23,7 +23,13 @@ export const stagingFixAction = v.object({
   ),
   fromVersion: v.optional(v.string()),
   toVersion: v.optional(v.string()),
+  // Production version at run time (vulns are keyed to production)
+  prodVersion: v.optional(v.string()),
   note: v.optional(v.string()),
+  // Why an update didn't happen, plus raw error / diagnostic output
+  reason: v.optional(v.string()),
+  detail: v.optional(v.string()),
+  tone: v.optional(v.union(v.literal("attention"), v.literal("ok"))),
 });
 
 const schema = defineSchema({

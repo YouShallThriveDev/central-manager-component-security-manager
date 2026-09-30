@@ -23,7 +23,11 @@ type Action = {
   status: "pending" | "done" | "failed" | "skipped";
   fromVersion?: string;
   toVersion?: string;
+  prodVersion?: string;
   note?: string;
+  reason?: string;
+  detail?: string;
+  tone?: "attention" | "ok";
 };
 
 const STATUS_CLASS: Record<string, string> = {
@@ -35,15 +39,34 @@ const STATUS_CLASS: Record<string, string> = {
   skipped: "border-amber-300 text-amber-700 bg-amber-50 dark:bg-amber-950/30",
 };
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, muted }: { status: string; muted?: boolean }) {
   return (
     <Badge
       variant="outline"
-      className={`text-xs ${STATUS_CLASS[status] ?? ""}`}
+      className={`text-xs ${muted ? "text-muted-foreground" : (STATUS_CLASS[status] ?? "")}`}
     >
       {status === "running" && <Loader2 className="animate-spin" />}
       {status}
     </Badge>
+  );
+}
+
+function Detail({ text }: { text: string }) {
+  const long = text.length > 240 || text.split("\n").length > 4;
+  const pre = (
+    <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 px-2 py-1 font-mono text-[11px] text-muted-foreground">
+      {text}
+    </pre>
+  );
+  if (!long) return pre;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer select-none text-[11px] text-muted-foreground hover:text-foreground">
+        <span className="group-open:hidden">Show details</span>
+        <span className="hidden group-open:inline">Hide details</span>
+      </summary>
+      <div className="mt-1">{pre}</div>
+    </details>
   );
 }
 
@@ -67,21 +90,38 @@ function ActionLine({
           .filter(Boolean)
           .join(" → ")
       : "";
+  const why = action.reason ?? action.note;
+  const whyClass =
+    action.reason && action.tone !== "ok"
+      ? "text-amber-700 dark:text-amber-400"
+      : "text-muted-foreground";
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      {showStatus && <StatusBadge status={action.status} />}
-      <span className="font-medium">{label}</span>
-      {versions && (
-        <span className="text-muted-foreground tabular-nums">{versions}</span>
-      )}
-      {action.fixedIn && !action.toVersion && (
-        <span className="text-muted-foreground">
-          (fixed in {action.fixedIn})
+    <div className="flex items-start gap-2 text-xs">
+      {showStatus && (
+        <span className="shrink-0">
+          <StatusBadge
+            status={action.status}
+            muted={action.status === "skipped" && action.tone === "ok"}
+          />
         </span>
       )}
-      {action.note && (
-        <span className="text-muted-foreground">— {action.note}</span>
-      )}
+      <div className="min-w-0 flex-1 space-y-1 pt-0.5">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="font-medium">{label}</span>
+          {versions && (
+            <span className="text-muted-foreground tabular-nums">
+              {versions}
+            </span>
+          )}
+          {action.fixedIn && !action.toVersion && (
+            <span className="text-muted-foreground">
+              (fixed in {action.fixedIn})
+            </span>
+          )}
+        </div>
+        {why && <p className={`break-words ${whyClass}`}>{why}</p>}
+        {action.detail && <Detail text={action.detail} />}
+      </div>
     </div>
   );
 }

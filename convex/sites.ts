@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { recalcSiteScore } from "./securityScore";
+import { GRADE_ORDER, recalcSiteScore, type Grade } from "./securityScore";
 import { query, internalMutation, internalQuery, mutation } from "./_generated/server";
 
 const gradeValidator = v.optional(
@@ -70,7 +70,14 @@ export const list = query({
     }
 
     if (args.grade && args.grade !== "all") {
-      sites = sites.filter((s) => s.securityGrade === args.grade);
+      // Cascading "this grade or worse" filter: selecting a grade shows that
+      // grade plus every grade below it in the app's A > B > C > D > F ordering.
+      const selectedIndex = GRADE_ORDER.indexOf(args.grade as Grade);
+      if (selectedIndex !== -1) {
+        sites = sites.filter(
+          (s) => s.securityGrade && GRADE_ORDER.indexOf(s.securityGrade as Grade) >= selectedIndex,
+        );
+      }
     }
 
     if (args.search) {

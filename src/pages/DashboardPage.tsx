@@ -446,11 +446,11 @@ export default function DashboardPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All grades</SelectItem>
-            <SelectItem value="A">Grade A</SelectItem>
-            <SelectItem value="B">Grade B</SelectItem>
-            <SelectItem value="C">Grade C</SelectItem>
-            <SelectItem value="D">Grade D</SelectItem>
-            <SelectItem value="F">Grade F</SelectItem>
+            <SelectItem value="A">A &gt;</SelectItem>
+            <SelectItem value="B">B &gt;</SelectItem>
+            <SelectItem value="C">C &gt;</SelectItem>
+            <SelectItem value="D">D &gt;</SelectItem>
+            <SelectItem value="F">F &gt;</SelectItem>
           </SelectContent>
         </Select>
         <Select value={phpFilter} onValueChange={setPhpFilter}>

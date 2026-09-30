@@ -357,35 +357,6 @@ export default function DashboardPage() {
             Monitor security posture across all production sites
           </p>
         </div>
-        <div className="flex items-center gap-2">
-        {latestFixJobId && (
-          <Button variant="ghost" onClick={() => openFix(latestFixJobId)}>
-            Last staging fix
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          className="gap-2"
-          disabled={selected.size === 0}
-          onClick={() => openFix(null)}
-        >
-          <Wrench className="size-4" />
-          Fix on staging{selected.size > 0 ? ` (${selected.size})` : ""}
-        </Button>
-        <Button
-          onClick={handleSync}
-          disabled={isSyncing || hasAccounts === undefined}
-          variant="outline"
-          className="gap-2"
-        >
-          {isSyncing ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <RefreshCw className="size-4" />
-          )}
-          {isSyncing ? "Syncing..." : "Sync"}
-        </Button>
-        </div>
       </div>
 
       {/* Sync Progress */}
@@ -492,6 +463,37 @@ export default function DashboardPage() {
           )}
         </div>
       )}
+
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          onClick={handleSync}
+          disabled={isSyncing || hasAccounts === undefined}
+          variant="outline"
+          className="gap-2"
+        >
+          {isSyncing ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <RefreshCw className="size-4" />
+          )}
+          {isSyncing ? "Syncing..." : "Sync"}
+        </Button>
+        <Button
+          variant="outline"
+          className="gap-2"
+          disabled={selected.size === 0}
+          onClick={() => openFix(null)}
+        >
+          <Wrench className="size-4" />
+          Fix on staging{selected.size > 0 ? ` (${selected.size})` : ""}
+        </Button>
+        {latestFixJobId && (
+          <Button variant="ghost" onClick={() => openFix(latestFixJobId)}>
+            Last staging fix
+          </Button>
+        )}
+      </div>
 
       {/* Filters */}
       <div className="flex items-center gap-3">

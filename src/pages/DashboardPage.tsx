@@ -103,6 +103,12 @@ function SecurityFeatureIcon({ active, icon: Icon, title }: { active?: boolean; 
 }
 
 type SiteDoc = Doc<"sites">;
+type SortKey = "php" | "grade";
+
+// Mirror GRADE_ORDER / VULN_WEIGHTS in convex/securityScore.ts (not imported: that module pulls in server code)
+const GRADE_RANK: GradeType[] = ["A", "B", "C", "D", "F"];
+const vulnWeight = (s: SiteDoc) =>
+  (s.openVulnCritical ?? 0) * 25 + (s.openVulnHigh ?? 0) * 10 + (s.openVulnMedium ?? 0) * 4 + (s.openVulnLow ?? 0);
 
 function SiteRow({ site, onClick }: { site: SiteDoc; onClick: () => void }) {
   return (
@@ -204,7 +210,7 @@ export default function DashboardPage() {
   const [search, setSearch] = useState("");
   const [gradeFilter, setGradeFilter] = useState<string>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
-  const [phpSort, setPhpSort] = useState<"none" | "asc" | "desc">("none");
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [phpFilter, setPhpFilter] = useState<string>("all");
   const [rocketFilter, setRocketFilter] = useState<string>("all");
 
@@ -232,14 +238,32 @@ export default function DashboardPage() {
     if (rocketFilter !== "all") {
       list = list.filter((s) => matchesRocketFilter(s.rocketStatus, rocketFilter));
     }
-    if (phpSort !== "none") {
+    if (sort?.key === "php") {
       list.sort((a, b) => {
         const diff = phpSortValue(a.phpVersion) - phpSortValue(b.phpVersion);
-        return phpSort === "asc" ? diff : -diff;
+        return sort.dir === "asc" ? diff : -diff;
+      });
+    } else if (sort?.key === "grade") {
+      // asc = worst grade, then most weighted open vulns, then lowest score; ungraded sites always last
+      list.sort((a, b) => {
+        const byDomain = a.domain.localeCompare(b.domain);
+        if (!a.securityGrade) return b.securityGrade ? 1 : byDomain;
+        if (!b.securityGrade) return -1;
+        const diff =
+          GRADE_RANK.indexOf(b.securityGrade as GradeType) - GRADE_RANK.indexOf(a.securityGrade as GradeType) ||
+          vulnWeight(b) - vulnWeight(a) ||
+          (a.securityScore ?? 0) - (b.securityScore ?? 0) ||
+          byDomain;
+        return sort.dir === "asc" ? diff : -diff;
       });
     }
     return list;
   })();
+
+  const cycleSort = (key: SortKey) =>
+    setSort((s) => (s?.key !== key ? { key, dir: "asc" } : s.dir === "asc" ? { key, dir: "desc" } : null));
+  const sortArrow = (key: SortKey) =>
+    sort?.key === key ? (sort.dir === "asc" ? "\u2191" : "\u2193") : "";
 
   const isSyncing = syncProgress?.status === "syncing";
   const isDone = syncProgress?.status === "done";
@@ -446,11 +470,11 @@ export default function DashboardPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All grades</SelectItem>
-            <SelectItem value="A">Grade A</SelectItem>
-            <SelectItem value="B">Grade B</SelectItem>
-            <SelectItem value="C">Grade C</SelectItem>
-            <SelectItem value="D">Grade D</SelectItem>
-            <SelectItem value="F">Grade F</SelectItem>
+            <SelectItem value="A">A &gt;</SelectItem>
+            <SelectItem value="B">B &gt;</SelectItem>
+            <SelectItem value="C">C &gt;</SelectItem>
+            <SelectItem value="D">D &gt;</SelectItem>
+            <SelectItem value="F">F &gt;</SelectItem>
           </SelectContent>
         </Select>
         <Select value={phpFilter} onValueChange={setPhpFilter}>
@@ -491,14 +515,23 @@ export default function DashboardPage() {
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 <button
                   type="button"
-                  onClick={() => setPhpSort((s) => (s === "none" ? "asc" : s === "asc" ? "desc" : "none"))}
+                  onClick={() => cycleSort("php")}
                   className="uppercase tracking-wider hover:text-foreground transition-colors"
                   title="Sort by PHP version"
                 >
-                  PHP {phpSort === "asc" ? "\u2191" : phpSort === "desc" ? "\u2193" : ""}
+                  PHP {sortArrow("php")}
                 </button>
               </th>
-              <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Grade</th>
+              <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                <button
+                  type="button"
+                  onClick={() => cycleSort("grade")}
+                  className="uppercase tracking-wider hover:text-foreground transition-colors"
+                  title="Sort by security score (worst first, then best first)"
+                >
+                  Grade {sortArrow("grade")}
+                </button>
+              </th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Score</th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Security Features</th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Plugins</th>

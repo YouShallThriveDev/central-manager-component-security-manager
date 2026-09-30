@@ -7,7 +7,7 @@ type Severity = "critical" | "high" | "medium" | "low";
 
 const VULN_WEIGHTS: Record<Severity, number> = { critical: 25, high: 10, medium: 4, low: 1 };
 const MAX_VULN_PENALTY = 60;
-const GRADE_ORDER: Grade[] = ["A", "B", "C", "D", "F"];
+export const GRADE_ORDER: Grade[] = ["A", "B", "C", "D", "F"];
 
 export type ScoreFeatures = {
   hasFirewall?: boolean;

@@ -191,6 +191,12 @@ async function fetchSiteDetails(
   return (body.result ?? body) as Record<string, unknown>;
 }
 
+// Parent sites reference their staging copy as staging.staging_id
+function stagingIdOf(site: Record<string, unknown>): number | null {
+  const id = (site.staging as { staging_id?: unknown } | undefined)?.staging_id;
+  return typeof id === "number" && id > 0 ? id : null;
+}
+
 // Token retrieval is done inline in doFullSync
 
 // ─── Progress Tracking ───────────────────────────────────────
@@ -485,6 +491,7 @@ async function doFullSync(
           rocketSiteId: siteId,
           domain,
           rocketUrl: site.rocket_url as string | undefined,
+          stagingSiteId: stagingIdOf(site),
         });
         siteIds.push({ docId, rocketSiteId: siteId, domain });
         sitesSynced++;
@@ -622,6 +629,7 @@ export const syncSitesOnly = action({
               rocketSiteId: site.id as number,
               domain: (site.domain as string) ?? "unknown",
               rocketUrl: site.rocket_url as string | undefined,
+              stagingSiteId: stagingIdOf(site),
             });
             totalSynced++;
           } catch {

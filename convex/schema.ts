@@ -2,6 +2,30 @@ import { authTables } from "@convex-dev/auth/server";
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
+export const stagingFixStatus = v.union(
+  v.literal("queued"),
+  v.literal("running"),
+  v.literal("done"),
+  v.literal("failed"),
+  v.literal("skipped"),
+);
+
+export const stagingFixAction = v.object({
+  kind: v.union(v.literal("update_plugin"), v.literal("activate_wordfence")),
+  slug: v.string(),
+  name: v.optional(v.string()),
+  fixedIn: v.optional(v.string()),
+  status: v.union(
+    v.literal("pending"),
+    v.literal("done"),
+    v.literal("failed"),
+    v.literal("skipped"),
+  ),
+  fromVersion: v.optional(v.string()),
+  toVersion: v.optional(v.string()),
+  note: v.optional(v.string()),
+});
+
 const schema = defineSchema({
   ...authTables,
 
@@ -25,6 +49,7 @@ const schema = defineSchema({
     rocketSiteId: v.number(), // Rocket.net site ID
     domain: v.string(),
     rocketUrl: v.optional(v.string()),
+    stagingSiteId: v.optional(v.number()), // Rocket.net id of this site's staging copy
     phpVersion: v.optional(v.string()),
     phpCheckedAt: v.optional(v.number()),
     // Rocket.net presence — set by the PHP/settings probe. Records are NEVER
@@ -150,6 +175,28 @@ const schema = defineSchema({
     key: v.string(),
     value: v.string(),
   }).index("by_key", ["key"]),
+
+  // Bulk "fix on staging" runs. Writes only ever target staging copies.
+  stagingFixJobs: defineTable({
+    status: v.union(v.literal("running"), v.literal("done")),
+    total: v.number(),
+    startedBy: v.optional(v.string()),
+    finishedAt: v.optional(v.number()),
+  }),
+
+  stagingFixItems: defineTable({
+    jobId: v.id("stagingFixJobs"),
+    siteId: v.id("sites"),
+    domain: v.string(),
+    stagingSiteId: v.optional(v.number()),
+    status: stagingFixStatus,
+    error: v.optional(v.string()),
+    actions: v.array(stagingFixAction),
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+  })
+    .index("by_job", ["jobId"])
+    .index("by_job_and_status", ["jobId", "status"]),
 
   // Action log for audit trail
   actionLogs: defineTable({

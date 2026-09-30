@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -32,11 +33,13 @@ import {
   KeyRound,
   Lock,
   Cpu,
+  Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { Doc } from "../../convex/_generated/dataModel";
+import type { Doc, Id } from "../../convex/_generated/dataModel";
 import { PhpVersionBadge, phpSortValue, matchesPhpFilter, PHP_FILTER_OPTIONS, PHP_FILTER_ALL_LABEL } from "@/components/PhpVersionBadge";
 import { RocketStatusBadge, matchesRocketFilter, ROCKET_FILTER_OPTIONS, ROCKET_FILTER_ALL_LABEL } from "@/components/RocketStatusBadge";
+import { StagingFixDialog } from "@/components/StagingFixDialog";
 
 type GradeType = "A" | "B" | "C" | "D" | "F";
 
@@ -110,12 +113,29 @@ const GRADE_RANK: GradeType[] = ["A", "B", "C", "D", "F"];
 const vulnWeight = (s: SiteDoc) =>
   (s.openVulnCritical ?? 0) * 25 + (s.openVulnHigh ?? 0) * 10 + (s.openVulnMedium ?? 0) * 4 + (s.openVulnLow ?? 0);
 
-function SiteRow({ site, onClick }: { site: SiteDoc; onClick: () => void }) {
+function SiteRow({
+  site,
+  onClick,
+  selected,
+  onSelect,
+}: {
+  site: SiteDoc;
+  onClick: () => void;
+  selected: boolean;
+  onSelect: (checked: boolean) => void;
+}) {
   return (
     <tr
       onClick={onClick}
       className="border-b border-border/50 hover:bg-muted/50 cursor-pointer transition-colors"
     >
+      <td className="py-3 pl-4 w-8" onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={(c) => onSelect(c === true)}
+          aria-label={`Select ${site.domain}`}
+        />
+      </td>
       <td className="py-3 px-4">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-2">
@@ -213,6 +233,9 @@ export default function DashboardPage() {
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [phpFilter, setPhpFilter] = useState<string>("all");
   const [rocketFilter, setRocketFilter] = useState<string>("all");
+  const [selected, setSelected] = useState<Set<Id<"sites">>>(new Set());
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fixJobId, setFixJobId] = useState<Id<"stagingFixJobs"> | null>(null);
 
   const navigate = useNavigate();
 
@@ -228,6 +251,7 @@ export default function DashboardPage() {
   const hasAccounts = useQuery(api.rocketAccounts.hasAny);
   const syncProgress = useQuery(api.settings.getSyncProgress);
   const phpSummary = useQuery(api.phpVersions.summary);
+  const latestFixJobId = useQuery(api.stagingFix.latestJobId);
 
   const visibleSites = (() => {
     if (!sites) return sites;
@@ -264,6 +288,21 @@ export default function DashboardPage() {
     setSort((s) => (s?.key !== key ? { key, dir: "asc" } : s.dir === "asc" ? { key, dir: "desc" } : null));
   const sortArrow = (key: SortKey) =>
     sort?.key === key ? (sort.dir === "asc" ? "\u2191" : "\u2193") : "";
+
+  const toggleSelected = (ids: Id<"sites">[], checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  const visibleSelected = visibleSites?.filter((s) => selected.has(s._id)).length ?? 0;
+  const openFix = (jobId: Id<"stagingFixJobs"> | null) => {
+    setFixJobId(jobId);
+    setFixOpen(true);
+  };
 
   const isSyncing = syncProgress?.status === "syncing";
   const isDone = syncProgress?.status === "done";
@@ -319,6 +358,20 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+        {latestFixJobId && (
+          <Button variant="ghost" onClick={() => openFix(latestFixJobId)}>
+            Last staging fix
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          className="gap-2"
+          disabled={selected.size === 0}
+          onClick={() => openFix(null)}
+        >
+          <Wrench className="size-4" />
+          Fix on staging{selected.size > 0 ? ` (${selected.size})` : ""}
+        </Button>
         <Button
           onClick={handleSync}
           disabled={isSyncing || hasAccounts === undefined}
@@ -511,6 +564,22 @@ export default function DashboardPage() {
         <table className="w-full">
           <thead>
             <tr className="border-b bg-muted/30">
+              <th className="py-2.5 pl-4 w-8">
+                <Checkbox
+                  checked={
+                    visibleSelected > 0 && visibleSelected === visibleSites?.length
+                      ? true
+                      : visibleSelected > 0
+                        ? "indeterminate"
+                        : false
+                  }
+                  onCheckedChange={(c) =>
+                    toggleSelected(visibleSites?.map((s) => s._id) ?? [], c === true)
+                  }
+                  disabled={!visibleSites?.length}
+                  aria-label="Select all visible sites"
+                />
+              </th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Domain</th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 <button
@@ -542,11 +611,11 @@ export default function DashboardPage() {
           <tbody>
             {visibleSites === undefined ? (
               <tr>
-                <td colSpan={8} className="py-12 text-center text-muted-foreground">Loading...</td>
+                <td colSpan={9} className="py-12 text-center text-muted-foreground">Loading...</td>
               </tr>
             ) : visibleSites.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-12 text-center">
+                <td colSpan={9} className="py-12 text-center">
                   <div className="flex flex-col items-center gap-2">
                     <Shield className="size-8 text-muted-foreground/50" />
                     <p className="text-sm text-muted-foreground">
@@ -563,12 +632,25 @@ export default function DashboardPage() {
                   key={site._id}
                   site={site}
                   onClick={() => navigate(`/site/${site._id}`)}
+                  selected={selected.has(site._id)}
+                  onSelect={(checked) => toggleSelected([site._id], checked)}
                 />
               ))
             )}
           </tbody>
         </table>
       </div>
+
+      <StagingFixDialog
+        open={fixOpen}
+        onOpenChange={setFixOpen}
+        siteIds={[...selected]}
+        jobId={fixJobId}
+        onJobStarted={(jobId) => {
+          setFixJobId(jobId);
+          setSelected(new Set());
+        }}
+      />
     </div>
   );
 }

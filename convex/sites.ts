@@ -19,6 +19,7 @@ const siteReturnValidator = v.object({
   rocketSiteId: v.number(),
   domain: v.string(),
   rocketUrl: v.optional(v.string()),
+  stagingSiteId: v.optional(v.number()),
   phpVersion: v.optional(v.string()),
   phpCheckedAt: v.optional(v.number()),
   wpVersion: v.optional(v.string()),
@@ -143,6 +144,8 @@ export const upsert = internalMutation({
     rocketSiteId: v.number(),
     domain: v.string(),
     rocketUrl: v.optional(v.string()),
+    // null = Rocket.net reports no staging copy (clears a stale id)
+    stagingSiteId: v.optional(v.union(v.number(), v.null())),
     phpVersion: v.optional(v.string()),
     wpVersion: v.optional(v.string()),
     wpUpdateAvailable: v.optional(v.boolean()),
@@ -177,6 +180,7 @@ export const upsert = internalMutation({
       if (args.accountId !== undefined) patch.accountId = args.accountId;
       if (args.domain) patch.domain = args.domain;
       if (args.rocketUrl !== undefined) patch.rocketUrl = args.rocketUrl;
+      if (args.stagingSiteId !== undefined) patch.stagingSiteId = args.stagingSiteId ?? undefined;
       if (args.phpVersion !== undefined) patch.phpVersion = args.phpVersion;
       if (args.wpVersion !== undefined) patch.wpVersion = args.wpVersion;
       if (args.wpUpdateAvailable !== undefined) patch.wpUpdateAvailable = args.wpUpdateAvailable;
@@ -205,6 +209,7 @@ export const upsert = internalMutation({
       rocketSiteId: args.rocketSiteId,
       domain: args.domain,
       rocketUrl: args.rocketUrl,
+      stagingSiteId: args.stagingSiteId ?? undefined,
       phpVersion: args.phpVersion,
       wpVersion: args.wpVersion,
       wpUpdateAvailable: args.wpUpdateAvailable,

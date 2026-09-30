@@ -105,6 +105,11 @@ function SecurityFeatureIcon({ active, icon: Icon, title }: { active?: boolean; 
 type SiteDoc = Doc<"sites">;
 type SortKey = "php" | "grade";
 
+// Mirror GRADE_ORDER / VULN_WEIGHTS in convex/securityScore.ts (not imported: that module pulls in server code)
+const GRADE_RANK: GradeType[] = ["A", "B", "C", "D", "F"];
+const vulnWeight = (s: SiteDoc) =>
+  (s.openVulnCritical ?? 0) * 25 + (s.openVulnHigh ?? 0) * 10 + (s.openVulnMedium ?? 0) * 4 + (s.openVulnLow ?? 0);
+
 function SiteRow({ site, onClick }: { site: SiteDoc; onClick: () => void }) {
   return (
     <tr
@@ -239,13 +244,17 @@ export default function DashboardPage() {
         return sort.dir === "asc" ? diff : -diff;
       });
     } else if (sort?.key === "grade") {
-      // asc = worst score first; unscored sites always last
+      // asc = worst grade, then most weighted open vulns, then lowest score; ungraded sites always last
       list.sort((a, b) => {
         const byDomain = a.domain.localeCompare(b.domain);
-        if (a.securityScore === undefined) return b.securityScore === undefined ? byDomain : 1;
-        if (b.securityScore === undefined) return -1;
-        const diff = a.securityScore - b.securityScore;
-        return (sort.dir === "asc" ? diff : -diff) || byDomain;
+        if (!a.securityGrade) return b.securityGrade ? 1 : byDomain;
+        if (!b.securityGrade) return -1;
+        const diff =
+          GRADE_RANK.indexOf(b.securityGrade as GradeType) - GRADE_RANK.indexOf(a.securityGrade as GradeType) ||
+          vulnWeight(b) - vulnWeight(a) ||
+          (a.securityScore ?? 0) - (b.securityScore ?? 0) ||
+          byDomain;
+        return sort.dir === "asc" ? diff : -diff;
       });
     }
     return list;

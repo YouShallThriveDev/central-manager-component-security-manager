@@ -219,4 +219,17 @@ http.route({
   }),
 });
 
+http.route({
+  path: "/api/admin/recalc-scores",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.SSO_SHARED_SECRET || "66mTA4FYT1TTYfuD6FC7eDHLN15vZC7T3L6DLz3tqbk";
+    if (request.headers.get("Authorization") !== `Bearer ${secret}`) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    const result = await ctx.runMutation(internal.securityScore.recalcAll, {});
+    return new Response(JSON.stringify({ status: "ok", ...result }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }),
+});
+
 export default http;

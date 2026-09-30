@@ -201,6 +201,18 @@ export default function SiteDetailPage() {
             <p className="text-sm text-muted-foreground mt-1">
               Security score: <strong className="tabular-nums">{site.securityScore ?? 0}</strong> / 100
             </p>
+            {(site.vulnPenalty ?? 0) > 0 && (
+              <p className="text-sm text-red-600 dark:text-red-400 mt-1">
+                Base <span className="tabular-nums">{site.securityBaseScore ?? 0}</span> − <span className="tabular-nums">{site.vulnPenalty}</span> for open vulnerabilities
+                {" "}({[
+                  site.openVulnCritical ? `${site.openVulnCritical} critical` : null,
+                  site.openVulnHigh ? `${site.openVulnHigh} high` : null,
+                  site.openVulnMedium ? `${site.openVulnMedium} medium` : null,
+                  site.openVulnLow ? `${site.openVulnLow} low` : null,
+                ].filter(Boolean).join(", ")})
+                {site.vulnGradeCap && <> · grade capped at {site.vulnGradeCap}</>}
+              </p>
+            )}
             <div className="w-full max-w-md mt-2 h-2.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all ${

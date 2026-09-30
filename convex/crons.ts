@@ -10,6 +10,14 @@ import { api, internal } from "./_generated/api";
 
 const crons = cronJobs();
 
+// Daily plugin sync before the vuln scan so scores use fresh plugin data
+crons.daily(
+  "daily-plugin-sync",
+  { hourUTC: 5, minuteUTC: 0 },
+  api.sync.syncEverything,
+  {},
+);
+
 // Run vulnerability scan daily at 6 AM UTC (2 AM ET)
 // The `notify: true` flag tells scanAllSites to send Slack alerts for new vulns
 crons.daily(

@@ -35,9 +35,14 @@ import { compareVersions } from "./vulnScan";
 const ROCKET_API_BASE = "https://api.rocket.net/v1";
 const CONCURRENCY = 3;
 const WORDFENCE = "wordfence";
-const VERIFY_ATTEMPTS = 4;
-const VERIFY_DELAY_MS = 5000;
+// Re-read staging after these waits (ms), ~2 min in total. Rocket.net's PUT
+// /plugins runs the update synchronously (activity log shows each update
+// finishing before the next request; /tasks stays empty), so the first
+// re-read usually confirms it — the rest is slack for slow sites.
+const VERIFY_DELAYS_MS = [2, 3, 5, 8, 12, 15, 20, 25, 30].map(s => s * 1000);
 const VERIFYING = "Requested, verifying on staging";
+// Rocket.net's "nothing to update" notes
+const ALREADY_RE = /already updated|up to date|no update/i;
 
 type FixAction = Infer<typeof stagingFixAction>;
 
@@ -372,6 +377,7 @@ async function fixSite(
   const probe = makeProbe(token, target, parent);
 
   const requested: FixAction[] = [];
+  const responses = new Map<FixAction, UpdateResult>();
   for (const a of actions) {
     const p = before.get(a.slug);
     if (!p) {
@@ -405,7 +411,7 @@ async function fixSite(
           continue;
         }
         const res = await updateStagingPlugin(token, target, parent, a.slug);
-        if (!res.changed) {
+        if (res.kind === "already") {
           Object.assign(a, {
             status: "skipped",
             ...(await diagnose(probe, a, p.version, res.message)),
@@ -413,6 +419,8 @@ async function fixSite(
           await save();
           continue;
         }
+        // Success or unclear: re-reading staging decides.
+        responses.set(a, res);
       } else {
         if (p.status === "active") {
           Object.assign(a, {
@@ -447,36 +455,61 @@ async function fixSite(
     (a.kind === "update_plugin"
       ? p.version !== a.fromVersion
       : p.status === "active");
-  for (let i = 0; i < VERIFY_ATTEMPTS && requested.length > 0; i++) {
-    await new Promise(r => setTimeout(r, VERIFY_DELAY_MS));
-    const after = await sitePlugins(token, parent.stagingSiteId);
+  let waited = 0;
+  for (let i = 0; i < VERIFY_DELAYS_MS.length && requested.length > 0; i++) {
+    await new Promise(r => setTimeout(r, VERIFY_DELAYS_MS[i]));
+    waited += VERIFY_DELAYS_MS[i];
+    const after = await sitePlugins(token, parent.stagingSiteId).catch(
+      () => null,
+    );
+    const last = i === VERIFY_DELAYS_MS.length - 1;
+    if (!after) {
+      if (last) throw new Error("Couldn't re-read plugins from staging");
+      continue;
+    }
     for (const a of requested) a.toVersion = after.get(a.slug)?.version;
-    if (
-      requested.every(a => applied(a, after.get(a.slug))) ||
-      i === VERIFY_ATTEMPTS - 1
-    ) {
+    if (requested.every(a => applied(a, after.get(a.slug))) || last) {
       for (const a of requested) {
         const p = after.get(a.slug);
+        const res = responses.get(a);
         if (!applied(a, p)) {
-          a.status = "failed";
-          if (a.kind === "update_plugin") {
+          const shown = p?.version ?? a.fromVersion ?? "?";
+          if (a.kind === "update_plugin" && res?.kind === "success") {
+            // Never report Rocket.net's success message as an error.
+            Object.assign(a, {
+              status: "needs_check",
+              note: undefined,
+              tone: "attention",
+              toVersion: undefined,
+              reason: `Rocket.net reported the update as successful${res.newVersion ? ` (to v${res.newVersion})` : ""}, but staging still shows v${shown} after ${Math.round(waited / 1000)}s — re-run or check staging.`,
+              detail: res.message
+                ? `Rocket.net update response: ${res.message}`
+                : undefined,
+            });
+          } else if (a.kind === "update_plugin") {
+            a.status = "failed";
             a.note = undefined;
+            a.toVersion = undefined;
             Object.assign(
               a,
               await diagnose(
                 probe,
                 a,
-                p?.version ?? a.fromVersion ?? "",
-                `Rocket.net accepted the update but staging still reports v${p?.version ?? "?"}`,
+                shown,
+                `Rocket.net accepted the update but staging still reports v${shown}${res?.message ? `. Rocket.net response: ${res.message}` : ""}`,
               ),
             );
           } else {
+            a.status = "failed";
             a.note =
               "Rocket.net accepted the request but the plugin is still inactive";
           }
         } else {
           a.status = "done";
           a.note = undefined;
+          a.reason = undefined;
+          a.detail = undefined;
+          a.tone = undefined;
           if (
             a.fixedIn &&
             a.toVersion &&
@@ -572,7 +605,7 @@ async function diagnose(
     }),
   );
   if (a.prodVersion && version && compareVersions(version, a.prodVersion) < 0) {
-    d.reason += ` Staging (v${version}) is behind production (v${a.prodVersion}) — refresh staging from live first.`;
+    d.reason = `Staging is older than live (v${version} vs v${a.prodVersion}). Pushing this staging copy live would downgrade it — refresh staging from live first. ${d.reason}`;
   }
   const detail = [d.detail, ...facts].filter(Boolean).join("\n");
   return { ...d, detail: detail ? clip(detail) : undefined, note: undefined };
@@ -590,7 +623,7 @@ async function diagnoseReason(
     reason,
     detail,
   });
-  const already = updateError && /already updated/i.test(updateError);
+  const already = updateError && ALREADY_RE.test(updateError);
 
   // 1. The actual error from the update attempt
   if (updateError && !already) {
@@ -654,6 +687,7 @@ async function diagnoseReason(
 
   // 5. Premium / third-party
   const lic = VENDOR_LICENSE[a.slug];
+  const name = a.name ?? a.slug;
   if (org.kind === "missing" || (org.kind === "unknown" && lic)) {
     if (lic) {
       const valid = await probe.option(lic.valid);
@@ -676,8 +710,22 @@ async function diagnoseReason(
         );
       }
     }
+    if (org.kind === "missing") {
+      // The premium build often lives in a different folder than the free
+      // wordpress.org edition (wpforms vs wpforms-lite, …-premium vs base).
+      const free = await probe.freeEdition(a.slug);
+      if (free) {
+        return attention(
+          `Premium edition of ${name} — updates come from the vendor and need a valid license.`,
+          `wordpress.org only has the free edition (${free.slug}${free.version ? `, v${free.version}` : ""}); "${a.slug}" isn't listed there.`,
+        );
+      }
+      return attention(
+        "Premium/third-party plugin, not on wordpress.org — updates come from the vendor and need a valid license.",
+      );
+    }
     return attention(
-      "Premium/third-party plugin, not on wordpress.org — updates need a valid vendor license.",
+      "Couldn't check wordpress.org; if this is a premium plugin, updates need a valid vendor license.",
     );
   }
 
@@ -696,6 +744,11 @@ async function diagnoseReason(
   }
 
   // 7. Fallback
+  if (org.kind === "unknown") {
+    facts.push(
+      "Couldn't check wordpress.org (request failed), so whether this is a premium plugin is unknown.",
+    );
+  }
   return attention(
     `No update offered on staging (v${version}); latest known fix is ${a.fixedIn}.`,
     wp?.update_version
@@ -779,6 +832,18 @@ function makeProbe(
       once(`org:${slug}`, () => wporgInfo(slug)).then(
         (x): OrgInfo => x ?? { kind: "unknown" },
       ),
+    /** The free wordpress.org edition of a premium slug, if one is listed. */
+    freeEdition: async (slug: string) => {
+      const candidates = [
+        `${slug}-lite`,
+        slug.replace(/-(premium|pro)$/, ""),
+      ].filter(c => c !== slug);
+      for (const c of candidates) {
+        const info = await once(`org:${c}`, () => wporgInfo(c));
+        if (info?.kind === "listed") return { slug: c, version: info.version };
+      }
+      return undefined;
+    },
   };
 }
 
@@ -842,8 +907,13 @@ async function wporgInfo(slug: string): Promise<OrgInfo> {
           : stripTags(body.description) || undefined,
       };
     }
-    if (body.error) return { kind: "missing" };
-    return resp.ok
+    // Only a definite "not found" means it isn't on wordpress.org; rate
+    // limits, outages and odd responses stay "unknown".
+    if (body.error)
+      return resp.status === 404 || /not found/i.test(body.error)
+        ? { kind: "missing" }
+        : { kind: "unknown" };
+    return resp.ok && body.version
       ? { kind: "listed", version: body.version }
       : { kind: "unknown" };
   } catch {
@@ -946,12 +1016,23 @@ async function stagingWrite(
 // PUT /sites/{id}/plugins {"plugin": "<slug>"} → 200
 // {"result":[{"name","old_version","new_version","note"}]}; with nothing to
 // update, note is "Plugin already updated" and the versions are empty.
+// 2026-10-01 on staging 249687: real updates came back with note "Plugin
+// updated successfully" (versions not reliably filled) and had already been
+// applied — the activity log showed each one before the next PUT was sent.
+type UpdateResult = {
+  /** already: nothing to update; success: Rocket.net says it updated;
+   *  other: no clear signal either way. */
+  kind: "already" | "success" | "other";
+  message?: string;
+  newVersion?: string;
+};
+
 async function updateStagingPlugin(
   token: string,
   target: StagingTarget,
   parent: StagingParent,
   slug: string,
-): Promise<{ changed: boolean; message?: string }> {
+): Promise<UpdateResult> {
   const res = await stagingWrite(token, target, parent, "PUT", "/plugins", {
     plugin: slug,
   });
@@ -964,11 +1045,17 @@ async function updateStagingPlugin(
       }[])
     : [];
   const row = rows.find(r => r.name === slug) ?? rows[0];
-  const changed = !!row?.new_version && row.new_version !== row.old_version;
+  const newVersion = row?.new_version || undefined;
+  const changed = !!newVersion && newVersion !== row?.old_version;
   const message =
     row?.note || [...(res.messages ?? [])].filter(Boolean).join("; ");
-  // No per-plugin row: let the verify step decide.
-  return { changed: changed || !row, message: message || undefined };
+  const kind =
+    changed || /success|updated to/i.test(message)
+      ? "success"
+      : ALREADY_RE.test(message)
+        ? "already"
+        : "other";
+  return { kind, message: message || undefined, newVersion };
 }
 
 // Confirmed 2026-10-01 against staging 306474 (rel "toggle_plugin_status"):

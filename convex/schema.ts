@@ -20,6 +20,8 @@ export const stagingFixAction = v.object({
     v.literal("done"),
     v.literal("failed"),
     v.literal("skipped"),
+    // Rocket.net reported success but staging didn't show the new version
+    v.literal("needs_check"),
   ),
   fromVersion: v.optional(v.string()),
   toVersion: v.optional(v.string()),

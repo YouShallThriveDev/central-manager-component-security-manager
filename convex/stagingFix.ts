@@ -971,11 +971,10 @@ async function updateStagingPlugin(
   return { changed: changed || !row, message: message || undefined };
 }
 
-// Endpoint + method confirmed from the site's own API links
-// (rel "toggle_plugin_status": PATCH /sites/{id}/plugins).
-// TODO(unconfirmed): body — "plugin" mirrors the confirmed PUT schema;
-// "action" is a guess. The verify step re-reads staging, so a no-op shows
-// as failed, and a 400 surfaces Rocket.net's validation message.
+// Confirmed 2026-10-01 against staging 306474 (rel "toggle_plugin_status"):
+// PATCH /sites/{id}/plugins {"plugin": "<slug>", "status": "activate"} → 200
+// {"result":[{"name","activated":"true"}]}. "status" must be "activate" or
+// "deactivate"; GET /plugins then reports the plugin's status as "active".
 function activateStagingPlugin(
   token: string,
   target: StagingTarget,
@@ -984,7 +983,7 @@ function activateStagingPlugin(
 ) {
   return stagingWrite(token, target, parent, "PATCH", "/plugins", {
     plugin: slug,
-    action: "activate",
+    status: "activate",
   });
 }
 

@@ -4,11 +4,24 @@
  * assertStagingTarget; production sites must never be written to.
  */
 
-export const STAGING_SUFFIXES = ["-staging.wpdns.site", ".staging.wpdns.site"];
+// Rocket.net-owned hosting domains that staging copies are served from.
+// Observed: "<id>-staging.wpdns.site" (most) and "<id>-staging.onrocket.site".
+const STAGING_HOSTS = ["wpdns.site", "onrocket.site"];
 
-export const isStagingDomain = (domain: unknown): boolean =>
-  typeof domain === "string" &&
-  STAGING_SUFFIXES.some(s => domain.toLowerCase().endsWith(s));
+export const STAGING_SUFFIXES = STAGING_HOSTS.flatMap(h => [
+  `-staging.${h}`,
+  `.staging.${h}`,
+]);
+
+// Strict suffix match on a Rocket-owned host with a non-empty label before it,
+// so look-alikes such as "x-staging.onrocket.site.attacker.com" are rejected.
+export const isStagingDomain = (domain: unknown): boolean => {
+  if (typeof domain !== "string") return false;
+  const d = domain.trim().toLowerCase();
+  return STAGING_SUFFIXES.some(
+    s => d.length > s.length && d.endsWith(s) && !d.startsWith("."),
+  );
+};
 
 export type StagingTarget = {
   // Live GET /sites/{id} of the site about to be written to

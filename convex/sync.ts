@@ -1,4 +1,5 @@
 import { calculateSecurityScore } from "./securityScore";
+import { isStagingDomain } from "./stagingGuard";
 /**
  * Sync actions — pull production site data from Rocket.net API and
  * analyze security posture.
@@ -465,8 +466,7 @@ async function doFullSync(
     // parent sites have a staging.staging_id reference
     const productionSites = allSites.filter((s) => {
       // Production sites have a real domain and aren't staging subdomains
-      const domain = (s.domain as string) ?? "";
-      return !domain.endsWith("-staging.wpdns.site") && !domain.endsWith(".staging.wpdns.site");
+      return !isStagingDomain(s.domain);
     });
 
     await ctx.runMutation(internal.rocketAccounts.updateAfterSync, {
@@ -608,13 +608,9 @@ export const syncSitesOnly = action({
       if (!account.apiToken) continue;
       try {
         const allSites = await fetchAllSites(account.apiToken);
-        const productionSites = allSites.filter((s) => {
-          const domain = (s.domain as string) ?? "";
-          return (
-            !domain.endsWith("-staging.wpdns.site") &&
-            !domain.endsWith(".staging.wpdns.site")
-          );
-        });
+        const productionSites = allSites.filter(
+          (s) => !isStagingDomain(s.domain),
+        );
 
         await ctx.runMutation(internal.rocketAccounts.updateAfterSync, {
           id: account._id as any,

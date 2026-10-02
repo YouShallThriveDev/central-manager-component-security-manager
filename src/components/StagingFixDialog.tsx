@@ -192,7 +192,7 @@ function CopyReport({ job }: { job: Job }) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">
-          Report (for Asana)
+          Report
         </span>
         <Button size="sm" variant="outline" onClick={copy}>
           {copied ? <Check className="size-4" /> : <Copy className="size-4" />}

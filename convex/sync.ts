@@ -1,4 +1,5 @@
 import { calculateSecurityScore } from "./securityScore";
+import { isStagingDomain } from "./stagingGuard";
 /**
  * Sync actions — pull production site data from Rocket.net API and
  * analyze security posture.
@@ -189,6 +190,12 @@ async function fetchSiteDetails(
 ): Promise<Record<string, unknown>> {
   const body = await rocketGet(token, `/sites/${siteId}`);
   return (body.result ?? body) as Record<string, unknown>;
+}
+
+// Parent sites reference their staging copy as staging.staging_id
+function stagingIdOf(site: Record<string, unknown>): number | null {
+  const id = (site.staging as { staging_id?: unknown } | undefined)?.staging_id;
+  return typeof id === "number" && id > 0 ? id : null;
 }
 
 // Token retrieval is done inline in doFullSync
@@ -459,8 +466,7 @@ async function doFullSync(
     // parent sites have a staging.staging_id reference
     const productionSites = allSites.filter((s) => {
       // Production sites have a real domain and aren't staging subdomains
-      const domain = (s.domain as string) ?? "";
-      return !domain.endsWith("-staging.wpdns.site") && !domain.endsWith(".staging.wpdns.site");
+      return !isStagingDomain(s.domain);
     });
 
     await ctx.runMutation(internal.rocketAccounts.updateAfterSync, {
@@ -485,6 +491,7 @@ async function doFullSync(
           rocketSiteId: siteId,
           domain,
           rocketUrl: site.rocket_url as string | undefined,
+          stagingSiteId: stagingIdOf(site),
         });
         siteIds.push({ docId, rocketSiteId: siteId, domain });
         sitesSynced++;
@@ -601,13 +608,9 @@ export const syncSitesOnly = action({
       if (!account.apiToken) continue;
       try {
         const allSites = await fetchAllSites(account.apiToken);
-        const productionSites = allSites.filter((s) => {
-          const domain = (s.domain as string) ?? "";
-          return (
-            !domain.endsWith("-staging.wpdns.site") &&
-            !domain.endsWith(".staging.wpdns.site")
-          );
-        });
+        const productionSites = allSites.filter(
+          (s) => !isStagingDomain(s.domain),
+        );
 
         await ctx.runMutation(internal.rocketAccounts.updateAfterSync, {
           id: account._id as any,
@@ -622,6 +625,7 @@ export const syncSitesOnly = action({
               rocketSiteId: site.id as number,
               domain: (site.domain as string) ?? "unknown",
               rocketUrl: site.rocket_url as string | undefined,
+              stagingSiteId: stagingIdOf(site),
             });
             totalSynced++;
           } catch {

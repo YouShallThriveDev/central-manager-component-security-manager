@@ -173,6 +173,17 @@ async function fetchSitePlugins(
   return (body.result ?? []) as Array<Record<string, unknown>>;
 }
 
+// GET /sites/{id}/themes → result: [{ name, status ("active" | "parent" |
+// "inactive"), version, update ("none" | "available"), update_version, title,
+// description }] (checked 2026-10-02 on 175507 / staging 282768).
+async function fetchSiteThemes(
+  token: string,
+  siteId: number,
+): Promise<Array<Record<string, unknown>>> {
+  const body = await rocketGet(token, `/sites/${siteId}/themes`);
+  return (body.result ?? []) as Array<Record<string, unknown>>;
+}
+
 async function fetchMuPlugins(
   token: string,
   siteId: number,
@@ -269,6 +280,36 @@ async function scanSiteSecurity(
     };
   });
 
+  // Fetch themes (scanned for vulnerabilities like plugins). null = the
+  // request failed, so the stored list is kept rather than wiped.
+  let themes: Array<{
+    slug: string;
+    displayName?: string;
+    status: string;
+    version?: string;
+    updateAvailable: boolean;
+    updateVersion?: string;
+  }> | null = null;
+  try {
+    const rawThemes = await fetchSiteThemes(token, rocketSiteId);
+    themes = rawThemes
+      .filter((t) => typeof t.name === "string" && t.name)
+      .map((t) => ({
+        slug: t.name as string,
+        displayName: (t.title as string | undefined) || (t.name as string),
+        status: (t.status as string | undefined) ?? "inactive",
+        version: (t.version as string | undefined) || undefined,
+        updateAvailable:
+          t.update !== "none" &&
+          t.update !== undefined &&
+          t.update !== null &&
+          t.update !== "",
+        updateVersion: (t.update_version as string | undefined) || undefined,
+      }));
+  } catch {
+    /* non-critical */
+  }
+
   // Fetch MU-plugins
   let rawMuPlugins: Array<Record<string, unknown>> = [];
   try {
@@ -346,6 +387,13 @@ async function scanSiteSecurity(
       securityCategory: p.securityCategory ?? undefined,
     })),
   });
+
+  if (themes) {
+    await ctx.runMutation(internal.siteThemes.batchUpsert, {
+      siteId: docId as any,
+      themes,
+    });
+  }
 
   // Save MU-plugin data
   await ctx.runMutation(internal.siteMuPlugins.batchUpsert, {

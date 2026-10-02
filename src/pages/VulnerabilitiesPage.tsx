@@ -160,11 +160,11 @@ export default function VulnerabilitiesPage() {
       const result = await rescanSite({ siteId: siteId as any });
       if (result.resolved > 0) {
         toast.success(
-          `${domain}: ${result.resolved} vulnerabilit${result.resolved !== 1 ? "ies" : "y"} resolved! ${result.pluginsChecked} plugins checked.`,
+          `${domain}: ${result.resolved} vulnerabilit${result.resolved !== 1 ? "ies" : "y"} resolved! ${result.pluginsChecked} plugins and ${result.themesChecked} themes checked.`,
         );
       } else {
         toast.info(
-          `${domain}: ${result.pluginsChecked} plugins checked, ${result.vulnsFound} vulnerabilities found (${result.newVulns} new). No changes in status.`,
+          `${domain}: ${result.pluginsChecked} plugins and ${result.themesChecked} themes checked, ${result.vulnsFound} vulnerabilities found (${result.newVulns} new). No changes in status.`,
         );
       }
     } catch (e) {
@@ -242,7 +242,7 @@ export default function VulnerabilitiesPage() {
             </div>
             <span className="text-sm tabular-nums text-muted-foreground">
               {vulnScanProgress.total > 0
-                ? `${vulnScanProgress.completed} / ${vulnScanProgress.total} plugins`
+                ? `${vulnScanProgress.completed} / ${vulnScanProgress.total} plugins & themes`
                 : ""}
             </span>
           </div>
@@ -443,7 +443,7 @@ export default function VulnerabilitiesPage() {
                 Site
               </th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Plugin
+                Plugin / theme
               </th>
               <th className="py-2.5 px-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Severity
@@ -511,7 +511,17 @@ export default function VulnerabilitiesPage() {
                   </td>
                   <td className="py-3 px-4">
                     <div className="flex flex-col gap-0.5">
-                      <span className="text-sm">{vuln.pluginSlug}</span>
+                      <span className="flex items-center gap-1.5 text-sm">
+                        {vuln.pluginSlug}
+                        {vuln.componentType === "theme" && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] px-1.5 py-0 border-violet-300 text-violet-700 bg-violet-50 dark:bg-violet-950/30"
+                          >
+                            Theme
+                          </Badge>
+                        )}
+                      </span>
                       {vuln.pluginVersion && (
                         <span className="text-xs text-muted-foreground tabular-nums">
                           v{vuln.pluginVersion}

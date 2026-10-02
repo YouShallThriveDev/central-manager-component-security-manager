@@ -10,8 +10,16 @@ export const stagingFixStatus = v.union(
   v.literal("skipped"),
 );
 
+// Which kind of WordPress component a vulnerability belongs to. Rows written
+// before themes were scanned have no value and are plugins.
+export const componentType = v.union(v.literal("plugin"), v.literal("theme"));
+
 export const stagingFixAction = v.object({
-  kind: v.union(v.literal("update_plugin"), v.literal("activate_wordfence")),
+  kind: v.union(
+    v.literal("update_plugin"),
+    v.literal("activate_wordfence"),
+    v.literal("update_theme"),
+  ),
   slug: v.string(),
   name: v.optional(v.string()),
   fixedIn: v.optional(v.string()),
@@ -32,6 +40,9 @@ export const stagingFixAction = v.object({
   reason: v.optional(v.string()),
   detail: v.optional(v.string()),
   tone: v.optional(v.union(v.literal("attention"), v.literal("ok"))),
+  // update_theme only: bundled plugins (display names) this theme update is
+  // expected to bring a newer version of
+  covers: v.optional(v.array(v.string())),
 });
 
 const schema = defineSchema({
@@ -136,6 +147,19 @@ const schema = defineSchema({
     .index("by_site", ["siteId"])
     .index("by_site_and_slug", ["siteId", "slug"]),
 
+  // Themes per site, from Rocket.net GET /sites/{id}/themes
+  siteThemes: defineTable({
+    siteId: v.id("sites"),
+    slug: v.string(),
+    displayName: v.optional(v.string()),
+    status: v.string(), // Rocket.net: "active" | "parent" | "inactive"
+    version: v.optional(v.string()),
+    updateAvailable: v.optional(v.boolean()),
+    updateVersion: v.optional(v.string()),
+  })
+    .index("by_site", ["siteId"])
+    .index("by_site_and_slug", ["siteId", "slug"]),
+
   // MU-plugins per site
   siteMuPlugins: defineTable({
     siteId: v.id("sites"),
@@ -146,9 +170,11 @@ const schema = defineSchema({
     .index("by_site", ["siteId"])
     .index("by_site_and_filename", ["siteId", "filename"]),
 
-  // Vulnerability alerts per site+plugin
+  // Vulnerability alerts per site+component (plugin or theme). pluginSlug /
+  // pluginVersion hold the theme's slug/version when componentType is "theme".
   vulnerabilities: defineTable({
     siteId: v.id("sites"),
+    componentType: v.optional(componentType), // unset = "plugin"
     pluginSlug: v.string(),
     pluginVersion: v.optional(v.string()),
     cveId: v.optional(v.string()), // e.g. CVE-2026-12345

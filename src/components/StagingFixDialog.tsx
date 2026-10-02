@@ -17,7 +17,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 
 type Action = {
-  kind: "update_plugin" | "activate_wordfence";
+  kind: "update_plugin" | "activate_wordfence" | "update_theme";
   slug: string;
   name?: string;
   fixedIn?: string;
@@ -29,7 +29,20 @@ type Action = {
   reason?: string;
   detail?: string;
   tone?: "attention" | "ok";
+  covers?: string[];
 };
+
+const actionLabel = (a: Action) =>
+  a.kind === "activate_wordfence"
+    ? "Activate Wordfence"
+    : a.kind === "update_theme"
+      ? `Update theme ${a.name ?? a.slug}`
+      : `Update ${a.name ?? a.slug}`;
+
+const actionKey = (a: Action) => `${a.kind}:${a.slug}`;
+
+const coversText = (a: Action) =>
+  a.covers?.length ? `covers bundled ${a.covers.join(", ")}` : undefined;
 
 const STATUS_CLASS: Record<string, string> = {
   queued: "text-muted-foreground",
@@ -82,12 +95,10 @@ function ActionLine({
   action: Action;
   showStatus?: boolean;
 }) {
-  const label =
-    action.kind === "activate_wordfence"
-      ? "Activate Wordfence"
-      : `Update ${action.name ?? action.slug}`;
+  const label = actionLabel(action);
+  const covers = coversText(action);
   const versions =
-    action.kind === "update_plugin"
+    action.kind !== "activate_wordfence"
       ? [
           action.fromVersion && `v${action.fromVersion}`,
           action.toVersion ? `v${action.toVersion}` : "latest",
@@ -123,6 +134,7 @@ function ActionLine({
               (fixed in {action.fixedIn})
             </span>
           )}
+          {covers && <span className="text-muted-foreground">({covers})</span>}
         </div>
         {why && <p className={`break-words ${whyClass}`}>{why}</p>}
         {action.detail && <Detail text={action.detail} />}
@@ -150,16 +162,14 @@ function jobReport(job: Job): string {
       lines.push(indent(i.status === "skipped" ? "Reason" : "Error", i.error));
     if (i.status === "skipped") continue;
     for (const a of i.actions) {
-      const label =
-        a.kind === "activate_wordfence"
-          ? "Activate Wordfence"
-          : `Update ${a.name ?? a.slug}`;
+      const label = actionLabel(a);
       const versions =
-        a.kind === "update_plugin"
+        a.kind !== "activate_wordfence"
           ? [a.fromVersion, a.toVersion].filter(Boolean).join(" → ")
           : "";
       const extra = [
         a.fixedIn && `fixed in ${a.fixedIn}`,
+        coversText(a),
         a.prodVersion &&
           a.prodVersion !== a.fromVersion &&
           `live ${a.prodVersion}`,
@@ -263,7 +273,9 @@ function PlanView({
                 )}
               </div>
               {!p.skipReason &&
-                p.actions.map(a => <ActionLine key={a.slug} action={a} />)}
+                p.actions.map(a => (
+                  <ActionLine key={actionKey(a)} action={a} />
+                ))}
             </div>
           ))
         )}
@@ -339,7 +351,7 @@ function JobView({ jobId }: { jobId: Id<"stagingFixJobs"> }) {
             )}
             {i.status !== "skipped" &&
               i.actions.map(a => (
-                <ActionLine key={a.slug} action={a} showStatus />
+                <ActionLine key={actionKey(a)} action={a} showStatus />
               ))}
           </div>
         ))}

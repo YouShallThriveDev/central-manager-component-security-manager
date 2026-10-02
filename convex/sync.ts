@@ -1,5 +1,7 @@
 import { calculateSecurityScore } from "./securityScore";
 import { isStagingDomain } from "./stagingGuard";
+import { compareVersions } from "./vulnScan";
+import { parseVersionPhp } from "./wpCore";
 /**
  * Sync actions — pull production site data from Rocket.net API and
  * analyze security posture.
@@ -203,6 +205,43 @@ async function fetchSiteDetails(
   return (body.result ?? body) as Record<string, unknown>;
 }
 
+// WordPress core version: Rocket.net has no field for it, so read
+// wp-includes/version.php through the read-only file viewer (confirmed
+// 2026-10-02: GET /sites/175507/files/view?filename=/wp-includes/version.php
+// → result.content with $wp_version = '7.1.2').
+async function fetchCoreVersion(
+  token: string,
+  siteId: number,
+): Promise<string | undefined> {
+  // The filename must keep literal slashes: "%2F" gets "File does not exist"
+  // (URLSearchParams would encode them), so it goes in the path as-is.
+  const body = await rocketGet(
+    token,
+    `/sites/${siteId}/files/view?filename=/wp-includes/version.php`,
+  );
+  const result = (body.result ?? {}) as { content?: unknown };
+  return parseVersionPhp(result.content);
+}
+
+// Latest WordPress release from wordpress.org, cached for an hour so a sync
+// makes one request rather than one per site.
+let latestWp: { at: number; version?: string } | undefined;
+async function latestWordPress(): Promise<string | undefined> {
+  if (latestWp && Date.now() - latestWp.at < 3600_000) return latestWp.version;
+  let version: string | undefined;
+  try {
+    const resp = await fetch("https://api.wordpress.org/core/version-check/1.7/", {
+      headers: { "User-Agent": "SecurityManager/1.0" },
+    });
+    const body = (await resp.json()) as { offers?: { response?: string; version?: string }[] };
+    version = body.offers?.find((o) => o.response === "upgrade" || o.response === "latest")?.version;
+  } catch {
+    /* non-critical */
+  }
+  latestWp = { at: Date.now(), version };
+  return version;
+}
+
 // Parent sites reference their staging copy as staging.staging_id
 function stagingIdOf(site: Record<string, unknown>): number | null {
   const id = (site.staging as { staging_id?: unknown } | undefined)?.staging_id;
@@ -271,10 +310,9 @@ async function scanSiteSecurity(
             : ("inactive" as const),
       version: p.version as string | undefined,
       updateAvailable:
-        p.update !== "none" &&
-        p.update !== undefined &&
-        p.update !== null &&
-        p.update !== "",
+        // "none" and "version higher than expected" are not updates
+        p.update === "available",
+      updateVersion: (p.update_version as string | undefined) || undefined,
       isSecurityPlugin: cat !== null,
       securityCategory: cat,
     };
@@ -300,12 +338,23 @@ async function scanSiteSecurity(
         status: (t.status as string | undefined) ?? "inactive",
         version: (t.version as string | undefined) || undefined,
         updateAvailable:
-          t.update !== "none" &&
-          t.update !== undefined &&
-          t.update !== null &&
-          t.update !== "",
+          // "none" and "version higher than expected" are not updates
+          t.update === "available",
         updateVersion: (t.update_version as string | undefined) || undefined,
       }));
+  } catch {
+    /* non-critical */
+  }
+
+  // WordPress core version (one read-only GET) vs the latest release
+  let wpVersion: string | undefined;
+  let wpUpdateVersion: string | undefined;
+  try {
+    wpVersion = await fetchCoreVersion(token, rocketSiteId);
+    const latest = wpVersion ? await latestWordPress() : undefined;
+    if (wpVersion && latest && compareVersions(latest, wpVersion) > 0) {
+      wpUpdateVersion = latest;
+    }
   } catch {
     /* non-critical */
   }
@@ -383,6 +432,7 @@ async function scanSiteSecurity(
       status: p.status,
       version: p.version,
       updateAvailable: p.updateAvailable,
+      updateVersion: p.updateAvailable ? p.updateVersion : undefined,
       isSecurityPlugin: p.isSecurityPlugin,
       securityCategory: p.securityCategory ?? undefined,
     })),
@@ -407,6 +457,11 @@ async function scanSiteSecurity(
     rocketSiteId,
     domain: domain ?? "",
     phpVersion,
+    wpVersion,
+    // Only known when both versions were read; otherwise leave it as it was
+    wpUpdateAvailable:
+      wpVersion && latestWp?.version ? !!wpUpdateVersion : undefined,
+    wpUpdateVersion,
     sslEnabled,
     securityScore: score,
     securityGrade: grade,

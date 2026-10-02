@@ -19,10 +19,17 @@ export const stagingFixAction = v.object({
     v.literal("update_plugin"),
     v.literal("activate_wordfence"),
     v.literal("update_theme"),
+    // WordPress core (slug "wordpress"), via WP-CLI on staging
+    v.literal("update_core"),
   ),
   slug: v.string(),
   name: v.optional(v.string()),
   fixedIn: v.optional(v.string()),
+  // Planned for an open vulnerability (older rows: fixedIn implies it)
+  vuln: v.optional(v.boolean()),
+  // Version the update is expected to bring (from the last sync, then from
+  // staging at run time)
+  offered: v.optional(v.string()),
   status: v.union(
     v.literal("pending"),
     v.literal("done"),
@@ -78,6 +85,7 @@ const schema = defineSchema({
     rocketMissingSince: v.optional(v.number()),
     wpVersion: v.optional(v.string()),
     wpUpdateAvailable: v.optional(v.boolean()),
+    wpUpdateVersion: v.optional(v.string()), // latest WordPress release, when newer
     sslEnabled: v.optional(v.boolean()),
     lastSyncedAt: v.optional(v.number()),
     // Security summary
@@ -131,6 +139,7 @@ const schema = defineSchema({
     ),
     version: v.optional(v.string()),
     updateAvailable: v.optional(v.boolean()),
+    updateVersion: v.optional(v.string()),
     isSecurityPlugin: v.boolean(),
     securityCategory: v.optional(
       v.union(

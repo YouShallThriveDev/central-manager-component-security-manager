@@ -15,6 +15,17 @@
  * Themes with open vulnerabilities get an update_theme action, run the same
  * way through PUT /themes. A plugin found to be bundled with a theme that has
  * an update on staging adds (or joins) an update_theme for that theme.
+ *
+ * Every available update is applied, not only vulnerability fixes: the plan
+ * holds every plugin/theme update the last production sync saw, plus each
+ * open vulnerability (marked `vuln`), plus WordPress core. At run time
+ * staging's own lists (Rocket.net, plus WP-CLI for premium updaters) decide:
+ * updates staging offers that weren't planned are added; planned ones staging
+ * doesn't offer are skipped with a reason. Run order follows the sections in
+ * fixSections.ts: plugins, themes, core last, then Security (Wordfence).
+ *
+ * Core is updated with WP-CLI (`core update`, then `core update-db`) on
+ * staging — Rocket.net has no core-update endpoint. See runCore().
  */
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { type Infer, v } from "convex/values";
@@ -28,13 +39,22 @@ import {
   type QueryCtx,
   query,
 } from "./_generated/server";
+import { isVulnFix, orderActions, sectionOf } from "./fixSections";
 import { stagingFixAction, stagingFixStatus } from "./schema";
 import {
   assertStagingTarget,
+  isAllowedWpCli,
   type StagingParent,
   type StagingTarget,
 } from "./stagingGuard";
 import { compareVersions } from "./vulnScan";
+import {
+  classifyCoreOutput,
+  isMajorCoreUpdate,
+  parseCheckUpdate,
+  parseCoreVersion,
+  parseVersionPhp,
+} from "./wpCore";
 
 const ROCKET_API_BASE = "https://api.rocket.net/v1";
 const CONCURRENCY = 3;
@@ -47,6 +67,14 @@ const VERIFY_DELAYS_MS = [2, 3, 5, 8, 12, 15, 20, 25, 30].map(s => s * 1000);
 const VERIFYING = "Requested, verifying on staging";
 // Rocket.net's "nothing to update" notes
 const ALREADY_RE = /already updated|up to date|no update/i;
+// One site runs inside one Convex action (10 min limit). Past this point no
+// new update is requested (the rest are skipped with a re-run note); core,
+// the slowest step, only starts before CORE_BUDGET_MS.
+const RUN_BUDGET_MS = 6 * 60_000;
+const CORE_BUDGET_MS = 5 * 60_000;
+const OUT_OF_TIME =
+  "Not run — this site reached the time limit for one run. Re-run Fix on staging to continue.";
+const CORE_CMD_FLAGS = "--skip-plugins --skip-themes";
 
 type FixAction = Infer<typeof stagingFixAction>;
 
@@ -56,31 +84,67 @@ async function buildPlan(ctx: QueryCtx, siteId: Id<"sites">) {
   const site = await ctx.db.get(siteId);
   if (!site) return null;
 
-  const vulns = await ctx.db
-    .query("vulnerabilities")
-    .withIndex("by_site", q => q.eq("siteId", siteId))
-    .collect();
-  const themeNames = new Map(
-    (
-      await ctx.db
-        .query("siteThemes")
-        .withIndex("by_site", q => q.eq("siteId", siteId))
-        .collect()
-    ).map(t => [t.slug, t.displayName]),
-  );
+  const [vulns, plugins, themes] = await Promise.all([
+    ctx.db
+      .query("vulnerabilities")
+      .withIndex("by_site", q => q.eq("siteId", siteId))
+      .collect(),
+    ctx.db
+      .query("sitePlugins")
+      .withIndex("by_site", q => q.eq("siteId", siteId))
+      .collect(),
+    ctx.db
+      .query("siteThemes")
+      .withIndex("by_site", q => q.eq("siteId", siteId))
+      .collect(),
+  ]);
   const byKey = new Map<string, FixAction>();
+  const add = (a: FixAction) => byKey.set(`${a.kind}:${a.slug}`, a);
+
+  // Every update production was offered at the last sync
+  for (const p of plugins) {
+    if (!p.updateAvailable || p.status === "must-use") continue;
+    add({
+      kind: "update_plugin",
+      slug: p.slug,
+      name: p.displayName,
+      fromVersion: p.version,
+      prodVersion: p.version,
+      offered: p.updateVersion,
+      status: "pending",
+    });
+  }
+  for (const t of themes) {
+    if (!t.updateAvailable) continue;
+    add({
+      kind: "update_theme",
+      slug: t.slug,
+      name: t.displayName,
+      fromVersion: t.version,
+      prodVersion: t.version,
+      offered: t.updateVersion,
+      status: "pending",
+    });
+  }
+
+  // Open vulnerabilities, with or without an update
+  const names = new Map<string, string | undefined>([
+    ...plugins.map(p => [`update_plugin:${p.slug}`, p.displayName] as const),
+    ...themes.map(t => [`update_theme:${t.slug}`, t.displayName] as const),
+  ]);
   for (const x of vulns) {
     if (x.status !== "open") continue;
-    const theme = x.componentType === "theme";
-    const key = `${theme ? "theme" : "plugin"}:${x.pluginSlug}`;
+    const kind = x.componentType === "theme" ? "update_theme" : "update_plugin";
+    const key = `${kind}:${x.pluginSlug}`;
     const a: FixAction = byKey.get(key) ?? {
-      kind: theme ? "update_theme" : "update_plugin",
+      kind,
       slug: x.pluginSlug,
-      name: theme ? themeNames.get(x.pluginSlug) : undefined,
+      name: names.get(key),
       fromVersion: x.pluginVersion,
       prodVersion: x.pluginVersion,
       status: "pending",
     };
+    a.vuln = true;
     if (
       x.fixedInVersion &&
       (!a.fixedIn || compareVersions(x.fixedInVersion, a.fixedIn) > 0)
@@ -89,26 +153,39 @@ async function buildPlan(ctx: QueryCtx, siteId: Id<"sites">) {
     }
     byKey.set(key, a);
   }
-  const all = [...byKey.values()];
-  // Theme updates run after plugins (and are listed after them)
-  const actions = all.filter(a => a.kind !== "update_theme");
+
+  // Core: staging may differ from live, so it's always checked during the run
+  add({
+    kind: "update_core",
+    slug: "wordpress",
+    name: "WordPress",
+    fromVersion: site.wpVersion,
+    prodVersion: site.wpVersion,
+    offered: site.wpUpdateAvailable ? site.wpUpdateVersion : undefined,
+    note:
+      site.wpUpdateAvailable && site.wpUpdateVersion
+        ? undefined
+        : site.wpVersion
+          ? "Live is on the latest release; staging is checked during the run"
+          : "Checked during the run",
+    status: "pending",
+  });
+
   if (site.wordfenceInstalled && !site.wordfenceActive) {
-    actions.push({
+    add({
       kind: "activate_wordfence",
       slug: WORDFENCE,
       name: "Wordfence",
       status: "pending",
     });
   }
-  actions.push(...all.filter(a => a.kind === "update_theme"));
+  const actions = orderActions([...byKey.values()]);
 
   const skipReason = !site.stagingSiteId
     ? "No staging copy on Rocket.net"
     : site.rocketStatus === "missing"
       ? "Site is missing from Rocket.net"
-      : actions.length === 0
-        ? "Nothing to fix"
-        : undefined;
+      : undefined;
 
   return {
     siteId,
@@ -276,7 +353,12 @@ export const saveItem = internalMutation({
     const summary = actions
       .map(a => {
         const why = a.reason ?? a.note;
-        const what = a.kind === "update_theme" ? `theme ${a.slug}` : a.slug;
+        const what =
+          a.kind === "update_theme"
+            ? `theme ${a.slug}`
+            : a.kind === "update_core"
+              ? "core"
+              : a.slug;
         return `${what}: ${a.status}${why ? ` (${why})` : ""}`;
       })
       .join("; ");
@@ -374,10 +456,11 @@ export const worker = internalAction({
 // ─── Per-site run ────────────────────────────────────────────
 
 type Source = "plugins" | "themes";
-const sourceOf = (a: FixAction): Source =>
-  a.kind === "update_theme" ? "themes" : "plugins";
 const isUpdate = (a: FixAction) =>
   a.kind === "update_plugin" || a.kind === "update_theme";
+/** Rocket.net's list offers an update ("none" and "version higher than
+ *  expected" don't). */
+const rocketOffers = (p?: { update?: string }) => p?.update === "available";
 
 type RunCtx = {
   token: string;
@@ -385,6 +468,10 @@ type RunCtx = {
   parent: StagingParent;
   probe: Probe;
   actions: FixAction[];
+  /** Past this time no new update is requested. */
+  deadline: number;
+  /** Core only starts before this time. */
+  coreDeadline: number;
   /** Staging's list as read at the start of the run (memoized). */
   staging: (s: Source) => Promise<Map<string, RocketItem>>;
   /** Production's list, read-only (memoized; empty if it can't be read). */
@@ -400,6 +487,7 @@ async function fixSite(
   actions: FixAction[],
   save: () => Promise<unknown>,
 ) {
+  const startedAt = Date.now();
   if (!parent.stagingSiteId) throw new Error("No staging copy on record");
   const stagingId = parent.stagingSiteId;
   const detail = await rocketGet(token, `/sites/${stagingId}`);
@@ -421,6 +509,8 @@ async function fixSite(
     parent,
     probe: makeProbe(token, target, parent),
     actions,
+    deadline: startedAt + RUN_BUDGET_MS,
+    coreDeadline: startedAt + CORE_BUDGET_MS,
     staging: s => once(`staging:${s}`, () => siteList(token, stagingId, s)),
     // Read-only: production versions, to spot staging lag / already-fixed.
     prod: s =>
@@ -438,15 +528,14 @@ async function fixSite(
         const stg = (await rc.staging("themes").catch(() => undefined))?.get(
           theme.name,
         );
-        const offered =
-          (!!stg?.update && stg.update !== "none") ||
-          theme.update === "available";
+        const offered = rocketOffers(stg) || theme.update === "available";
         if (!stg || !offered) return false;
         t = {
           kind: "update_theme",
           slug: theme.name,
           name: stg.title || theme.title,
           fromVersion: stg.version,
+          offered: stg.update_version || theme.update_version || undefined,
           status: "pending",
         };
         actions.push(t);
@@ -456,19 +545,48 @@ async function fixSite(
     },
   };
 
+  // Everything staging itself offers, not only what the plan saw on live
+  await addStagingUpdates(rc);
+  actions.splice(0, actions.length, ...orderActions(actions));
+  await save();
+
+  const of = (section: string) =>
+    actions.filter(a => sectionOf(a.kind) === section);
   // Plugins first: diagnosing them can add theme updates for bundled plugins.
-  await runPass(
-    rc,
-    actions.filter(a => sourceOf(a) === "plugins"),
-    "plugins",
-    save,
-  );
-  await runPass(
-    rc,
-    actions.filter(a => sourceOf(a) === "themes"),
-    "themes",
-    save,
-  );
+  await runPass(rc, of("plugins"), "plugins", save);
+  await runPass(rc, of("themes"), "themes", save);
+  for (const a of of("core")) await runCore(rc, a, save);
+  await runPass(rc, of("security"), "plugins", save);
+}
+
+/** Add an update for every plugin/theme staging offers one for (Rocket.net's
+ *  list, or WP-CLI for updates a premium updater injects) that isn't planned
+ *  yet. */
+async function addStagingUpdates(rc: RunCtx) {
+  for (const source of ["plugins", "themes"] as const) {
+    const stg = await rc.staging(source).catch(() => undefined);
+    if (!stg) continue;
+    const kind = source === "themes" ? "update_theme" : "update_plugin";
+    const cli: Map<string, { update?: string; update_version?: string }> =
+      source === "themes"
+        ? new Map(((await rc.probe.themes()) ?? []).map(t => [t.name, t]))
+        : ((await rc.probe.wpPlugins()) ?? new Map());
+    for (const [slug, p] of stg) {
+      if (p.status === "must-use" || p.status === "dropin") continue;
+      if (rc.actions.some(a => a.kind === kind && a.slug === slug)) continue;
+      const w = cli.get(slug);
+      if (!rocketOffers(p) && w?.update !== "available") continue;
+      rc.actions.push({
+        kind,
+        slug,
+        name: p.title || slug,
+        fromVersion: p.version || undefined,
+        offered:
+          (rocketOffers(p) ? p.update_version : w?.update_version) || undefined,
+        status: "pending",
+      });
+    }
+  }
 }
 
 /** Request every action in `list` (all from one source), then re-read
@@ -487,23 +605,24 @@ async function runPass(
   const requested: FixAction[] = [];
   const responses = new Map<FixAction, UpdateResult>();
   for (const a of list) {
+    if (a.status !== "pending") continue;
     const p = before.get(a.slug);
     if (!p) {
       Object.assign(a, { status: "skipped", note: "Not installed on staging" });
       continue;
     }
-    a.prodVersion = prod.get(a.slug)?.version || a.fromVersion;
+    a.prodVersion = prod.get(a.slug)?.version || a.prodVersion;
     a.fromVersion = p.version || a.fromVersion;
     a.name = p.title || a.name;
+    if (Date.now() > rc.deadline) {
+      Object.assign(a, { status: "skipped", note: OUT_OF_TIME });
+      await save();
+      continue;
+    }
     try {
       if (isUpdate(a)) {
-        const ok = alreadyFixed(a, p.version);
-        if (ok) {
-          Object.assign(a, { status: "skipped", ...ok });
-          await save();
-          continue;
-        }
-        let offered = !!p.update && p.update !== "none";
+        let offered = rocketOffers(p);
+        let offeredVersion = offered ? p.update_version : undefined;
         if (!offered) {
           // Rocket.net's list can miss updates that a premium plugin's or
           // theme's own updater injects; WP-CLI sees more of them.
@@ -512,15 +631,18 @@ async function runPass(
               ? (await rc.probe.themes())?.find(t => t.name === a.slug)
               : (await rc.probe.wpPlugins())?.get(a.slug);
           offered = w?.update === "available";
+          offeredVersion = offered ? w?.update_version : undefined;
         }
         if (!offered) {
+          const ok = alreadyFixed(a, p.version);
           Object.assign(a, {
             status: "skipped",
-            ...(await diagnose(rc, a, p.version)),
+            ...(ok ?? (await diagnose(rc, a, p.version))),
           });
           await save();
           continue;
         }
+        a.offered = offeredVersion || a.offered;
         const res = await updateStaging(token, target, parent, source, a.slug);
         if (res.kind === "already") {
           Object.assign(a, {
@@ -630,12 +752,33 @@ async function runPass(
 export function doneNote(a: {
   kind: string;
   fixedIn?: string;
+  fromVersion?: string;
   toVersion?: string;
+  prodVersion?: string;
   covers?: string[];
 }): string | undefined {
   const notes: string[] = [];
   if (a.fixedIn && a.toVersion && compareVersions(a.toVersion, a.fixedIn) < 0) {
     notes.push(`Updated, but still below the fixed version ${a.fixedIn}`);
+  }
+  if (
+    a.prodVersion &&
+    a.toVersion &&
+    compareVersions(a.toVersion, a.prodVersion) < 0
+  ) {
+    notes.push(
+      `Still older than live (v${a.prodVersion}) — pushing this staging copy live would downgrade it; refresh staging from live first`,
+    );
+  }
+  if (
+    a.kind === "update_core" &&
+    a.fromVersion &&
+    a.toVersion &&
+    isMajorCoreUpdate(a.fromVersion, a.toVersion)
+  ) {
+    notes.push(
+      "Major WordPress release — check the site on staging before pushing live",
+    );
   }
   if (a.kind === "update_theme" && a.covers?.length) {
     const list = a.covers.join(", ");
@@ -644,6 +787,178 @@ export function doneNote(a: {
     );
   }
   return notes.length ? notes.join(". ") : undefined;
+}
+
+// ─── WordPress core ──────────────────────────────────────────
+
+/**
+ * Update WordPress core on staging with WP-CLI: `core version`, `core
+ * check-update`, `core update`, then `core update-db` once the new version
+ * shows. Plugins/themes are skipped while WP-CLI loads WordPress, because one
+ * fataling plugin otherwise breaks every command (seen on staging 282768).
+ * The read-only steps were confirmed 2026-10-02 on staging 282768; `core
+ * update` itself has not been run against a real site yet.
+ */
+async function runCore(rc: RunCtx, a: FixAction, save: () => Promise<unknown>) {
+  if (a.status !== "pending") return;
+  const cli = (cmd: string) =>
+    stagingWpCli(rc.token, rc.target, rc.parent, cmd);
+  const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const older = () =>
+    !!a.prodVersion &&
+    !!a.fromVersion &&
+    compareVersions(a.fromVersion, a.prodVersion) < 0;
+  const withLag = (reason: string) =>
+    older()
+      ? `Staging is older than live (v${a.fromVersion} vs v${a.prodVersion}). Pushing this staging copy live would downgrade WordPress — refresh staging from live first. ${reason}`
+      : reason;
+  const finish = (
+    status: "failed" | "skipped" | "needs_check",
+    reason: string,
+    detail?: string,
+    tone: "attention" | "ok" = "attention",
+  ) =>
+    Object.assign(a, {
+      status,
+      note: undefined,
+      tone: older() ? "attention" : tone,
+      reason: withLag(reason),
+      detail: detail?.trim() ? clip(detail.trim()) : undefined,
+    });
+
+  try {
+    // Live's version, read-only (wp-includes/version.php on production)
+    a.prodVersion =
+      (await prodCoreVersion(rc.token, rc.parent.rocketSiteId)) ??
+      a.prodVersion;
+
+    const vOut = await cli("core version");
+    const from = parseCoreVersion(vOut);
+    if (!from) {
+      finish("failed", "Couldn't read the WordPress version on staging", vOut);
+      return;
+    }
+    a.fromVersion = from;
+
+    const check = parseCheckUpdate(
+      await cli(`core check-update --format=json ${CORE_CMD_FLAGS}`),
+    );
+    if (check.kind === "error") {
+      finish(
+        "failed",
+        "Couldn't check for a WordPress update on staging — output below",
+        check.output,
+      );
+      return;
+    }
+    if (check.kind === "latest") {
+      a.offered = undefined;
+      finish(
+        "skipped",
+        `Already on the latest WordPress (v${from}).`,
+        undefined,
+        "ok",
+      );
+      return;
+    }
+    a.offered = check.version;
+    if (Date.now() > rc.coreDeadline) {
+      Object.assign(a, { status: "skipped", note: OUT_OF_TIME });
+      return;
+    }
+
+    a.note = VERIFYING;
+    await save();
+    let out = "";
+    let sendError: string | undefined;
+    try {
+      out = await cli(`core update ${CORE_CMD_FLAGS}`);
+    } catch (e) {
+      // The request can time out while WordPress is still updating;
+      // re-reading the version below decides.
+      sendError = errText(e);
+      if (sendError.startsWith("Refusing Rocket.net write")) throw e;
+    }
+    const outcome = sendError ? "unclear" : classifyCoreOutput(out);
+    if (outcome === "error") {
+      finish(
+        "failed",
+        mapUpdateError(out, "core") ??
+          "WordPress couldn't update core on staging — error below",
+        out,
+      );
+      return;
+    }
+    if (outcome === "already") {
+      finish(
+        "skipped",
+        `WordPress reports it is already up to date (v${from}).`,
+        out,
+        "ok",
+      );
+      return;
+    }
+
+    // Re-read the version until it changes
+    let now: string | undefined;
+    for (const ms of VERIFY_DELAYS_MS) {
+      await new Promise(r => setTimeout(r, ms));
+      now = parseCoreVersion(await cli("core version").catch(() => ""));
+      if (now && now !== from) break;
+    }
+    const sent = [
+      sendError && `Request: ${sendError}`,
+      out.trim() && `WP-CLI core update: ${out.trim()}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (!now || now === from) {
+      finish(
+        "failed",
+        `Staging still reports WordPress v${now ?? from} after the update — output below`,
+        sent,
+      );
+      return;
+    }
+    a.toVersion = now;
+
+    let db = "";
+    try {
+      db = await cli(`core update-db ${CORE_CMD_FLAGS}`);
+    } catch (e) {
+      db = errText(e);
+    }
+    if (classifyCoreOutput(db) === "error" || !db.trim()) {
+      finish(
+        "needs_check",
+        `WordPress files updated to v${now}, but the database upgrade didn't confirm — open wp-admin on staging to finish it.`,
+        [sent, `WP-CLI core update-db: ${db.trim() || "(no output)"}`].join(
+          "\n",
+        ),
+      );
+      return;
+    }
+    Object.assign(a, {
+      status: "done",
+      reason: undefined,
+      detail: undefined,
+      tone: undefined,
+      note: undefined,
+    });
+    a.note = doneNote(a);
+  } catch (e) {
+    const msg = errText(e);
+    if (msg.startsWith("Refusing Rocket.net write")) throw e;
+    finish(
+      a.note === VERIFYING ? "needs_check" : "failed",
+      a.note === VERIFYING
+        ? "The core update was sent, but staging couldn't be re-checked — check the WordPress version on staging."
+        : "WordPress core check failed — error below",
+      msg,
+    );
+  } finally {
+    await save();
+  }
 }
 
 // ─── Why couldn't it update? ─────────────────────────────────
@@ -713,12 +1028,12 @@ const VENDOR_LICENSE: Record<
 
 const stripTags = (s?: string) => (s ?? "").replace(/<[^>]*>/g, "").trim();
 
-/** Map an update error to plain English, if it's a known one. */
-function mapUpdateError(err: string, component: "plugin" | "theme") {
-  return UPDATE_ERRORS.find(([re]) => re.test(err))?.[1].replace(
-    /\{c\}/g,
-    component,
-  );
+/** Map an update error to plain English, if it's a known one. Core has no
+ *  license, so the premium/license pattern doesn't apply to it. */
+function mapUpdateError(err: string, component: "plugin" | "theme" | "core") {
+  return (component === "core" ? UPDATE_ERRORS.slice(1) : UPDATE_ERRORS)
+    .find(([re]) => re.test(err))?.[1]
+    .replace(/\{c\}/g, component);
 }
 
 async function diagnose(
@@ -728,8 +1043,14 @@ async function diagnose(
   updateError?: string,
 ): Promise<Diagnosis> {
   const facts: string[] = [];
+  // Routine updates (no open vulnerability, not needed for a bundled
+  // plugin) get a plain reason; the vulnerability diagnostics don't apply.
   const reason =
-    a.kind === "update_theme" ? diagnoseThemeReason : diagnoseReason;
+    !isVulnFix(a) && !a.covers?.length
+      ? diagnosePlainReason
+      : a.kind === "update_theme"
+        ? diagnoseThemeReason
+        : diagnoseReason;
   const d = await reason(rc, a, version, updateError, facts).catch(
     (e): Diagnosis => ({
       tone: "attention",
@@ -749,6 +1070,44 @@ const attention = (reason: string, detail?: string): Diagnosis => ({
   reason,
   detail,
 });
+
+async function diagnosePlainReason(
+  _rc: RunCtx,
+  a: FixAction,
+  version: string,
+  updateError: string | undefined,
+  facts: string[],
+): Promise<Diagnosis> {
+  const component = a.kind === "update_theme" ? "theme" : "plugin";
+  const already = updateError && ALREADY_RE.test(updateError);
+  if (updateError && !already) {
+    return attention(
+      mapUpdateError(updateError, component) ??
+        `Rocket.net couldn't update the ${component} — error below`,
+      updateError,
+    );
+  }
+  if (already) facts.push(`Rocket.net update response: ${updateError}`);
+  if (a.offered && version && compareVersions(version, a.offered) >= 0) {
+    return {
+      tone: "ok",
+      reason: `Already up to date on staging (v${version}).`,
+    };
+  }
+  if (a.offered && already) {
+    // WP-CLI listed an update that Rocket.net's updater couldn't apply —
+    // typical for premium updates delivered by the vendor's own updater.
+    return attention(
+      `v${a.offered} is listed as available, but Rocket.net reports nothing to update (staging is on v${version}) — likely a premium update that needs the vendor's updater or license; update it in wp-admin on staging.`,
+    );
+  }
+  if (a.offered) {
+    return attention(
+      `No update offered on staging (v${version}), though live was offered v${a.offered} — WordPress's update check on staging may be stale, or a premium license may not cover the staging domain.`,
+    );
+  }
+  return { tone: "ok", reason: `No update offered on staging (v${version}).` };
+}
 
 async function diagnoseReason(
   rc: RunCtx,
@@ -1209,6 +1568,23 @@ async function siteList(
   return new Map((body.result ?? []).map(p => [p.name, p]));
 }
 
+/** Production's WordPress version, read-only via the file viewer; undefined
+ *  if it can't be read. The filename keeps literal slashes ("%2F" → 404). */
+async function prodCoreVersion(
+  token: string,
+  siteId: number,
+): Promise<string | undefined> {
+  try {
+    const r = await rocketGet(
+      token,
+      `/sites/${siteId}/files/view?filename=/wp-includes/version.php`,
+    );
+    return parseVersionPhp(r.content);
+  } catch {
+    return undefined;
+  }
+}
+
 type RocketEnvelope = {
   success?: boolean;
   messages?: string[];
@@ -1328,14 +1704,12 @@ function activateStagingPlugin(
   });
 }
 
-// Read-only WP-CLI commands the diagnostics may run on staging.
-const WPCLI_ALLOWED = /^(plugin (list|get)|theme (list|get)|option get) /;
-
 /**
  * POST /sites/{id}/wpcli {"command": "<args without wp>"} (confirmed
  * 2026-09-30). The response's result.response is a JSON string whose
  * "data" holds WP-CLI's combined output. Goes through the staging guard
- * like every other POST, and only allows read-only commands.
+ * like every other POST, and only allows the read-only diagnostics plus the
+ * core update steps (see isAllowedWpCli in stagingGuard.ts).
  */
 async function stagingWpCli(
   token: string,
@@ -1343,7 +1717,7 @@ async function stagingWpCli(
   parent: StagingParent,
   command: string,
 ): Promise<string> {
-  if (!WPCLI_ALLOWED.test(command) || /[;&|`$<>]/.test(command))
+  if (!isAllowedWpCli(command))
     throw new Error(`WP-CLI command not allowed: ${command}`);
   const res = await stagingWrite(token, target, parent, "POST", "/wpcli", {
     command,

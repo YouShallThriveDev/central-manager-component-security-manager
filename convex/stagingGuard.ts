@@ -60,3 +60,25 @@ export function assertStagingTarget(
   }
   return target.id as number;
 }
+
+// WP-CLI commands Fix on staging may send to a staging copy's /wpcli
+// endpoint (which stagingWrite only ever calls through assertStagingTarget).
+// Reads used by diagnostics, plus exactly the WordPress core update steps.
+// `core update` takes no --version/--force, so it can only move to the latest
+// release WordPress itself offers.
+const WPCLI_READ = /^(plugin (list|get)|theme (list|get)|option get) /;
+const SKIP_FLAGS = "( --skip-plugins| --skip-themes)*";
+const WPCLI_CORE = [
+  /^core version$/,
+  new RegExp(
+    `^core check-update( --format=json| --major| --minor)*${SKIP_FLAGS}$`,
+  ),
+  new RegExp(`^core update${SKIP_FLAGS}$`),
+  new RegExp(`^core update-db${SKIP_FLAGS}$`),
+];
+
+export function isAllowedWpCli(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  if (/[;&|`$<>\\\n\r]/.test(command)) return false;
+  return WPCLI_READ.test(command) || WPCLI_CORE.some(re => re.test(command));
+}

@@ -1,5 +1,4 @@
 import { useMutation, useQuery } from "convex/react";
-import type { FunctionReturnType } from "convex/server";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -13,23 +12,27 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  actionLabel,
+  coversText,
+  type FixAction,
+  jobReport,
+  type ReportJob,
+  statusLabel,
+  targetVersion,
+  vulnText,
+} from "@/lib/stagingFixReport";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import {
+  fixesVuln,
+  groupBySection,
+  sectionSummary,
+} from "../../convex/fixSections";
 
-type Action = {
-  kind: "update_plugin" | "activate_wordfence";
-  slug: string;
-  name?: string;
-  fixedIn?: string;
-  status: "pending" | "done" | "failed" | "skipped" | "needs_check";
-  fromVersion?: string;
-  toVersion?: string;
-  prodVersion?: string;
-  note?: string;
-  reason?: string;
-  detail?: string;
-  tone?: "attention" | "ok";
-};
+type Action = FixAction;
+
+const actionKey = (a: Action) => `${a.kind}:${a.slug}`;
 
 const STATUS_CLASS: Record<string, string> = {
   queued: "text-muted-foreground",
@@ -41,8 +44,6 @@ const STATUS_CLASS: Record<string, string> = {
   needs_check:
     "border-orange-300 text-orange-700 bg-orange-50 dark:bg-orange-950/30",
 };
-
-const statusLabel = (status: string) => status.replace(/_/g, " ");
 
 function StatusBadge({ status, muted }: { status: string; muted?: boolean }) {
   return (
@@ -82,19 +83,23 @@ function ActionLine({
   action: Action;
   showStatus?: boolean;
 }) {
-  const label =
-    action.kind === "activate_wordfence"
-      ? "Activate Wordfence"
-      : `Update ${action.name ?? action.slug}`;
+  const label = actionLabel(action);
+  const covers = coversText(action);
+  const target = targetVersion(action);
   const versions =
-    action.kind === "update_plugin"
+    action.kind !== "activate_wordfence"
       ? [
           action.fromVersion && `v${action.fromVersion}`,
-          action.toVersion ? `v${action.toVersion}` : "latest",
+          target
+            ? `v${target}`
+            : action.status === "skipped"
+              ? undefined
+              : "latest",
         ]
           .filter(Boolean)
           .join(" → ")
       : "";
+  const vuln = vulnText(action);
   const why = action.reason ?? action.note;
   const whyClass =
     action.reason && action.tone !== "ok"
@@ -118,11 +123,18 @@ function ActionLine({
               {versions}
             </span>
           )}
-          {action.fixedIn && !action.toVersion && (
-            <span className="text-muted-foreground">
-              (fixed in {action.fixedIn})
-            </span>
-          )}
+          {vuln &&
+            (fixesVuln(action) ? (
+              <Badge
+                variant="outline"
+                className="border-red-300 bg-red-50 px-1.5 py-0 text-[10px] font-normal text-red-700 dark:bg-red-950/30"
+              >
+                {vuln}
+              </Badge>
+            ) : (
+              <span className="text-muted-foreground">({vuln})</span>
+            ))}
+          {covers && <span className="text-muted-foreground">({covers})</span>}
         </div>
         {why && <p className={`break-words ${whyClass}`}>{why}</p>}
         {action.detail && <Detail text={action.detail} />}
@@ -131,52 +143,45 @@ function ActionLine({
   );
 }
 
-type Job = NonNullable<FunctionReturnType<typeof api.stagingFix.job>>;
-
-const indent = (label: string, text: string) =>
-  `  ${label}: ${text.trim().split("\n").join("\n    ")}`;
-
-/** Plain-text report of a job, for pasting into Asana. */
-function jobReport(job: Job): string {
-  const lines = [
-    `Fix on staging — ${new Date(job._creationTime).toLocaleString()} — ${job.status === "running" ? "running" : "finished"}`,
-  ];
-  for (const i of job.items) {
-    lines.push(
-      "",
-      `${i.domain}${i.stagingSiteId ? ` (staging #${i.stagingSiteId})` : ""} — ${statusLabel(i.status)}`,
-    );
-    if (i.error)
-      lines.push(indent(i.status === "skipped" ? "Reason" : "Error", i.error));
-    if (i.status === "skipped") continue;
-    for (const a of i.actions) {
-      const label =
-        a.kind === "activate_wordfence"
-          ? "Activate Wordfence"
-          : `Update ${a.name ?? a.slug}`;
-      const versions =
-        a.kind === "update_plugin"
-          ? [a.fromVersion, a.toVersion].filter(Boolean).join(" → ")
-          : "";
-      const extra = [
-        a.fixedIn && `fixed in ${a.fixedIn}`,
-        a.prodVersion &&
-          a.prodVersion !== a.fromVersion &&
-          `live ${a.prodVersion}`,
-      ]
-        .filter(Boolean)
-        .join(", ");
-      const why = a.reason ?? a.note;
-      lines.push(
-        `- ${label}${versions ? ` ${versions}` : ""}${extra ? ` (${extra})` : ""}: ${statusLabel(a.status)}${why ? ` — ${why}` : ""}`,
-      );
-      if (a.detail) lines.push(indent("Detail", a.detail));
-    }
-  }
-  return lines.join("\n");
+/** A site's actions under section headers (Plugins, Themes, Core,
+ *  Security) with per-section counts; empty sections are omitted. */
+function ActionSections({
+  actions,
+  mode,
+}: {
+  actions: Action[];
+  mode: "plan" | "run";
+}) {
+  return (
+    <div className="space-y-2.5">
+      {groupBySection(actions).map(g => {
+        const counts = sectionSummary(g, mode);
+        return (
+          <div key={g.section} className="space-y-1.5">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {g.label}
+              {counts && (
+                <span className="font-normal normal-case tracking-normal">
+                  {" "}
+                  · {counts}
+                </span>
+              )}
+            </div>
+            {g.actions.map(a => (
+              <ActionLine
+                key={actionKey(a)}
+                action={a}
+                showStatus={mode === "run"}
+              />
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
-function CopyReport({ job }: { job: Job }) {
+function CopyReport({ job }: { job: ReportJob }) {
   const text = jobReport(job);
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -192,7 +197,7 @@ function CopyReport({ job }: { job: Job }) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">
-          Report (for Asana)
+          Report
         </span>
         <Button size="sm" variant="outline" onClick={copy}>
           {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
@@ -239,8 +244,9 @@ function PlanView({
       <DialogHeader>
         <DialogTitle>Fix on staging — dry run</DialogTitle>
         <DialogDescription>
-          Changes apply only to each site's Rocket.net staging copy. Live sites
-          are never touched.
+          Every available plugin, theme and WordPress core update is applied,
+          only to each site's Rocket.net staging copy. Live sites are never
+          touched.
           {plans &&
             ` ${runnable.length} will run, ${plans.length - runnable.length} skipped.`}
         </DialogDescription>
@@ -262,8 +268,9 @@ function PlanView({
                   </span>
                 )}
               </div>
-              {!p.skipReason &&
-                p.actions.map(a => <ActionLine key={a.slug} action={a} />)}
+              {!p.skipReason && (
+                <ActionSections actions={p.actions} mode="plan" />
+              )}
             </div>
           ))
         )}
@@ -337,10 +344,9 @@ function JobView({ jobId }: { jobId: Id<"stagingFixJobs"> }) {
             {i.error && (
               <p className="text-xs text-red-600 break-words">{i.error}</p>
             )}
-            {i.status !== "skipped" &&
-              i.actions.map(a => (
-                <ActionLine key={a.slug} action={a} showStatus />
-              ))}
+            {i.status !== "skipped" && (
+              <ActionSections actions={i.actions} mode="run" />
+            )}
           </div>
         ))}
       </div>

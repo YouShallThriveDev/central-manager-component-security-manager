@@ -290,7 +290,7 @@ export default function SiteDetailPage() {
             <thead>
               <tr className="border-b text-xs text-muted-foreground">
                 <th className="py-2 px-4 text-left font-medium">Vulnerability</th>
-                <th className="py-2 px-4 text-left font-medium">Plugin</th>
+                <th className="py-2 px-4 text-left font-medium">Plugin / theme</th>
                 <th className="py-2 px-4 text-left font-medium">Severity</th>
                 <th className="py-2 px-4 text-left font-medium">Fix</th>
               </tr>
@@ -307,6 +307,11 @@ export default function SiteDetailPage() {
                   <td className="py-2.5 px-4">
                     <span className="text-sm">{v.pluginSlug}</span>
                     {v.pluginVersion && <span className="text-xs text-muted-foreground ml-1">v{v.pluginVersion}</span>}
+                    {v.componentType === "theme" && (
+                      <Badge variant="outline" className="ml-1.5 text-[10px] px-1.5 py-0 border-violet-300 text-violet-700 bg-violet-50 dark:bg-violet-950/30">
+                        Theme
+                      </Badge>
+                    )}
                   </td>
                   <td className="py-2.5 px-4">
                     <Badge
@@ -354,7 +359,7 @@ export default function SiteDetailPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b text-xs text-muted-foreground">
-                <th className="py-2 px-4 text-left font-medium">Plugin</th>
+                <th className="py-2 px-4 text-left font-medium">Plugin / theme</th>
                 <th className="py-2 px-4 text-left font-medium">Category</th>
                 <th className="py-2 px-4 text-left font-medium">Version</th>
                 <th className="py-2 px-4 text-left font-medium">Status</th>

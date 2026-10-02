@@ -1,6 +1,6 @@
 /**
  * Vulnerability scanning — uses the WPVulnerability.net API (free, no key needed)
- * to check installed plugins against known CVEs.
+ * to check installed plugins and themes against known CVEs.
  *
  * API docs: https://www.wpvulnerability.net/
  * Migrated from Wordfence Intelligence API v2 (deprecated/removed July 2026).
@@ -50,7 +50,6 @@ interface WPVulnResponse {
   error: number;
   data: {
     name: string;
-    plugin: string;
     vulnerability: WPVulnEntry[];
   } | null;
 }
@@ -107,18 +106,37 @@ function severityFromImpact(impact?: WPVulnImpact): { severity: Severity; score:
   return { severity, score };
 }
 
-// ─── Fetch vulnerabilities per slug ──────────────────────────
+// ─── Fetch vulnerabilities per component ─────────────────────
 
-async function fetchPluginVulns(slug: string): Promise<WPVulnEntry[]> {
+type ComponentType = "plugin" | "theme";
+
+/** One installed plugin or theme on one site. */
+type Component = { type: ComponentType; slug: string; version: string };
+
+const componentKey = (c: { type: ComponentType; slug: string }) =>
+  `${c.type}:${c.slug}`;
+
+// Same API and response shape for both; the official WPVulnerability client
+// builds `${host}${type}/${slug}/` with type "plugin" | "theme" | "core".
+export function wpvulnUrl(type: ComponentType, slug: string): string {
+  const s = encodeURIComponent(slug);
+  return type === "theme"
+    ? `https://www.wpvulnerability.net/theme/${s}/`
+    : `https://www.wpvulnerability.net/plugin/${s}`;
+}
+
+async function fetchComponentVulns(
+  type: ComponentType,
+  slug: string,
+): Promise<WPVulnEntry[]> {
   try {
-    const url = `https://www.wpvulnerability.net/plugin/${encodeURIComponent(slug)}`;
-    const resp = await fetch(url, {
+    const resp = await fetch(wpvulnUrl(type, slug), {
       headers: { "User-Agent": "YST-Security-Manager/1.0" },
     });
 
     if (!resp.ok) {
       if (resp.status === 429) {
-        console.warn(`WPVulnerability rate limited on slug ${slug}, skipping`);
+        console.warn(`WPVulnerability rate limited on ${type} ${slug}, skipping`);
       }
       return [];
     }
@@ -128,9 +146,151 @@ async function fetchPluginVulns(slug: string): Promise<WPVulnEntry[]> {
 
     return data.data.vulnerability;
   } catch (e) {
-    console.warn(`Failed to fetch vulns for ${slug}:`, e);
+    console.warn(`Failed to fetch vulns for ${type} ${slug}:`, e);
     return [];
   }
+}
+
+/** Fetch vulnerability data for each component, 5 at a time. */
+async function fetchVulnsFor(
+  components: Array<{ type: ComponentType; slug: string }>,
+  onBatch?: (completed: number) => Promise<unknown>,
+): Promise<Map<string, WPVulnEntry[]>> {
+  const vulnsByKey: Map<string, WPVulnEntry[]> = new Map();
+  const batchSize = 5;
+  for (let i = 0; i < components.length; i += batchSize) {
+    const batch = components.slice(i, i + batchSize);
+    const results = await Promise.all(
+      batch.map(async (c) => ({
+        key: componentKey(c),
+        vulns: await fetchComponentVulns(c.type, c.slug),
+      })),
+    );
+    for (const { key, vulns } of results) {
+      if (vulns.length > 0) vulnsByKey.set(key, vulns);
+    }
+    await onBatch?.(Math.min(i + batchSize, components.length));
+    // Small delay between batches
+    if (i + batchSize < components.length) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  return vulnsByKey;
+}
+
+/** Installed plugins (not must-use) and themes with a known version. */
+async function siteComponents(
+  ctx: { runQuery: (ref: any, args: any) => Promise<any> },
+  siteId: string,
+): Promise<Component[]> {
+  const plugins: Array<{ slug: string; version?: string; status: string }> =
+    await ctx.runQuery(internal.sitePlugins.listAllBySite, {
+      siteId: siteId as any,
+    });
+  const themes: Array<{ slug: string; version?: string }> =
+    await ctx.runQuery(internal.siteThemes.listAllBySite, {
+      siteId: siteId as any,
+    });
+  const out: Component[] = [];
+  for (const p of plugins) {
+    if (p.version && p.status !== "must-use") {
+      out.push({ type: "plugin", slug: p.slug, version: p.version });
+    }
+  }
+  for (const t of themes) {
+    if (t.version) out.push({ type: "theme", slug: t.slug, version: t.version });
+  }
+  return out;
+}
+
+/** Unique components across sites, in first-seen order. */
+function uniqueComponents(lists: Component[][]) {
+  const seen = new Map<string, { type: ComponentType; slug: string }>();
+  for (const list of lists) {
+    for (const c of list) {
+      if (!seen.has(componentKey(c))) seen.set(componentKey(c), { type: c.type, slug: c.slug });
+    }
+  }
+  return [...seen.values()];
+}
+
+/** The vulnerabilities.upsert fields for one WPVulnerability entry. */
+function vulnRecord(vuln: WPVulnEntry) {
+  // Extract CVE ID from sources
+  const cveSource = vuln.source.find((s) => s.id.startsWith("CVE-"));
+  const cveId = cveSource?.id;
+
+  // Get description from the best source
+  const description =
+    cveSource?.description ||
+    vuln.source.find((s) => s.description)?.description ||
+    vuln.description;
+
+  // Get severity and score
+  const { severity, score } = severityFromImpact(vuln.impact);
+
+  // Determine fixed version from operator
+  const fixedInVersion =
+    vuln.operator.unfixed === "0" && vuln.operator.max_version
+      ? vuln.operator.max_version
+      : undefined;
+
+  // Get source URL (prefer Wordfence, then Patchstack, then CVE link)
+  const sourceUrl =
+    vuln.source.find((s) => s.link.includes("wordfence.com"))?.link ||
+    vuln.source.find((s) => s.link.includes("patchstack.com"))?.link ||
+    cveSource?.link ||
+    vuln.source[0]?.link;
+
+  // Clean up title (decode HTML entities)
+  const title = vuln.name
+    .replace(/&#8211;/g, "–")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&#8217;/g, "'");
+
+  return {
+    cveId,
+    title: title.substring(0, 200),
+    severity,
+    cvssScore: score,
+    description: description ? description.substring(0, 1000) : undefined,
+    fixedInVersion,
+    source: "wpvulnerability",
+    sourceUrl,
+  };
+}
+
+/** Upsert every vulnerability affecting one installed component. */
+async function recordComponentVulns(
+  ctx: { runMutation: (ref: any, args: any) => Promise<any> },
+  siteId: string,
+  c: Component,
+  vulnsByKey: Map<string, WPVulnEntry[]>,
+): Promise<{ found: number; added: number; errors: number }> {
+  const r = { found: 0, added: 0, errors: 0 };
+  const entries = vulnsByKey.get(componentKey(c));
+  if (!entries) return r;
+
+  // Filter to vulnerabilities that affect this specific version
+  for (const vuln of entries.filter((x) => isVersionAffected(c.version, x.operator))) {
+    try {
+      const result = await ctx.runMutation(internal.vulnerabilities.upsert, {
+        siteId: siteId as any,
+        ...(c.type === "theme" ? { componentType: "theme" } : {}),
+        pluginSlug: c.slug,
+        pluginVersion: c.version,
+        ...vulnRecord(vuln),
+      });
+      r.found++;
+      if (result.isNew) r.added++;
+    } catch (e) {
+      r.errors++;
+      console.error("Failed to upsert vuln:", e);
+    }
+  }
+  return r;
 }
 
 // ─── Scan Action ─────────────────────────────────────────────
@@ -151,7 +311,7 @@ export const scanAllSites = action({
     newVulns: number;
     errors: number;
   }> => {
-    // Get all sites and their plugins
+    // Get all sites and their plugins + themes
     const sites: Array<{ _id: string; domain: string }> = (await ctx.runQuery(
       internal.sites.listAll,
       {},
@@ -160,195 +320,55 @@ export const scanAllSites = action({
       return { sitesScanned: 0, vulnsFound: 0, newVulns: 0, errors: 0 };
     }
 
-    // Collect all unique plugin slugs across all sites with their versions
-    const pluginsBySite: Map<
-      string,
-      Array<{ slug: string; version: string; siteId: string }>
-    > = new Map();
-    const allSlugs = new Set<string>();
-
+    const componentsBySite: Map<string, Component[]> = new Map();
     for (const site of sites) {
-      const plugins = await ctx.runQuery(internal.sitePlugins.listAllBySite, {
-        siteId: site._id as any,
-      });
-      const entries: Array<{
-        slug: string;
-        version: string;
-        siteId: string;
-      }> = [];
-      for (const p of plugins) {
-        if (p.version && p.status !== "must-use") {
-          allSlugs.add(p.slug);
-          entries.push({
-            slug: p.slug,
-            version: p.version,
-            siteId: site._id as string,
-          });
-        }
-      }
-      pluginsBySite.set(site._id as string, entries);
+      componentsBySite.set(site._id, await siteComponents(ctx, site._id));
     }
+    const unique = uniqueComponents([...componentsBySite.values()]);
+    const pluginCount = unique.filter((c) => c.type === "plugin").length;
+    const themeCount = unique.length - pluginCount;
 
-    const slugArray = Array.from(allSlugs);
-
-    // Update progress
-    await ctx.runMutation(internal.settings.setInternal, {
-      key: "vuln_scan_progress",
-      value: JSON.stringify({
-        status: "scanning",
-        phase: "Fetching vulnerability data…",
-        total: slugArray.length,
-        completed: 0,
-      }),
-    });
-
-    // Fetch vulnerability data per slug from WPVulnerability.net
-    // Process in batches of 5 concurrently to balance speed vs rate limiting
-    const vulnsBySlug: Map<string, WPVulnEntry[]> = new Map();
-    const batchSize = 5;
-
-    for (let i = 0; i < slugArray.length; i += batchSize) {
-      const batch = slugArray.slice(i, i + batchSize);
-      const results = await Promise.all(
-        batch.map(async (slug) => ({
-          slug,
-          vulns: await fetchPluginVulns(slug),
-        })),
-      );
-
-      for (const { slug, vulns } of results) {
-        if (vulns.length > 0) {
-          vulnsBySlug.set(slug, vulns);
-        }
-      }
-
-      await ctx.runMutation(internal.settings.setInternal, {
+    const progress = (status: string, phase: string, completed: number, extra = {}) =>
+      ctx.runMutation(internal.settings.setInternal, {
         key: "vuln_scan_progress",
-        value: JSON.stringify({
-          status: "scanning",
-          phase: "Checking plugins…",
-          total: slugArray.length,
-          completed: Math.min(i + batchSize, slugArray.length),
-        }),
+        value: JSON.stringify({ status, phase, total: unique.length, completed, ...extra }),
       });
 
-      // Small delay between batches
-      if (i + batchSize < slugArray.length) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
-    }
+    await progress("scanning", "Fetching vulnerability data…", 0);
 
-    // Match vulnerabilities to installed plugins on each site
+    // Fetch vulnerability data per plugin/theme slug from WPVulnerability.net
+    const vulnsByKey = await fetchVulnsFor(unique, (completed) =>
+      progress("scanning", "Checking plugins and themes…", completed),
+    );
+
+    // Match vulnerabilities to installed plugins and themes on each site
     let vulnsFound = 0;
     let newVulns = 0;
     let errors = 0;
 
-    for (const [siteId, sitePlugins] of pluginsBySite) {
-      for (const plugin of sitePlugins) {
-        const slugVulns = vulnsBySlug.get(plugin.slug);
-        if (!slugVulns) continue;
-
-        // Filter to vulnerabilities that affect this specific version
-        const matchingVulns = slugVulns.filter((vuln) =>
-          isVersionAffected(plugin.version, vuln.operator),
-        );
-
-        for (const vuln of matchingVulns) {
-          try {
-            // Extract CVE ID from sources
-            const cveSource = vuln.source.find((s) =>
-              s.id.startsWith("CVE-"),
-            );
-            const cveId = cveSource?.id;
-
-            // Get description from the best source
-            const description =
-              cveSource?.description ||
-              vuln.source.find((s) => s.description)?.description ||
-              vuln.description;
-
-            // Get severity and score
-            const { severity, score } = severityFromImpact(vuln.impact);
-
-            // Determine fixed version from operator
-            const fixedInVersion =
-              vuln.operator.unfixed === "0" && vuln.operator.max_version
-                ? vuln.operator.max_version
-                : undefined;
-
-            // Get source URL (prefer Wordfence, then Patchstack, then CVE link)
-            const sourceUrl =
-              vuln.source.find((s) =>
-                s.link.includes("wordfence.com"),
-              )?.link ||
-              vuln.source.find((s) =>
-                s.link.includes("patchstack.com"),
-              )?.link ||
-              cveSource?.link ||
-              vuln.source[0]?.link;
-
-            // Clean up title (decode HTML entities)
-            const title = vuln.name
-              .replace(/&#8211;/g, "–")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&amp;/g, "&")
-              .replace(/&#8217;/g, "'");
-
-            const result = await ctx.runMutation(
-              internal.vulnerabilities.upsert,
-              {
-                siteId: siteId as any,
-                pluginSlug: plugin.slug,
-                pluginVersion: plugin.version,
-                cveId,
-                title: title.substring(0, 200),
-                severity,
-                cvssScore: score,
-                description: description
-                  ? description.substring(0, 1000)
-                  : undefined,
-                fixedInVersion,
-                source: "wpvulnerability",
-                sourceUrl,
-              },
-            );
-            vulnsFound++;
-            if (result.isNew) newVulns++;
-          } catch (e) {
-            errors++;
-            console.error("Failed to upsert vuln:", e);
-          }
-        }
-
-        // Auto-resolve patched vulnerabilities
-        try {
-          await ctx.runMutation(internal.vulnerabilities.autoResolvePatched, {
-            siteId: siteId as any,
-          });
-        } catch {
-          // non-critical
-        }
+    for (const [siteId, components] of componentsBySite) {
+      for (const c of components) {
+        const r = await recordComponentVulns(ctx, siteId, c, vulnsByKey);
+        vulnsFound += r.found;
+        newVulns += r.added;
+        errors += r.errors;
+      }
+      // Auto-resolve patched vulnerabilities
+      try {
+        await ctx.runMutation(internal.vulnerabilities.autoResolvePatched, {
+          siteId: siteId as any,
+        });
+      } catch {
+        // non-critical
       }
     }
 
-    // Update progress
-    await ctx.runMutation(internal.settings.setInternal, {
-      key: "vuln_scan_progress",
-      value: JSON.stringify({
-        status: "done",
-        phase: "Complete",
-        total: slugArray.length,
-        completed: slugArray.length,
-        vulnsFound,
-        newVulns,
-      }),
-    });
+    await progress("done", "Complete", unique.length, { vulnsFound, newVulns });
 
     // Log
     await ctx.runMutation(internal.actionLogs.add, {
       action: "vuln_scan",
-      details: `Vulnerability scan: ${slugArray.length} plugins checked, ${vulnsFound} vulnerabilities found (${newVulns} new)`,
+      details: `Vulnerability scan: ${pluginCount} plugins and ${themeCount} themes checked, ${vulnsFound} vulnerabilities found (${newVulns} new)`,
       status: newVulns > 0 ? "error" : "success",
     });
 
@@ -372,107 +392,26 @@ export const rescanSite = action({
     newVulns: v.number(),
     resolved: v.number(),
     pluginsChecked: v.number(),
+    themesChecked: v.number(),
   }),
   handler: async (ctx, args): Promise<{
     vulnsFound: number;
     newVulns: number;
     resolved: number;
     pluginsChecked: number;
+    themesChecked: number;
   }> => {
-    // Get plugins for this site
-    const plugins: Array<{ slug: string; version: string; status: string }> =
-      (await ctx.runQuery(internal.sitePlugins.listAllBySite, {
-        siteId: args.siteId,
-      })) as any;
+    const components = await siteComponents(ctx, args.siteId);
+    const unique = uniqueComponents([components]);
+    const vulnsByKey = await fetchVulnsFor(unique);
 
-    const activePlugins = plugins.filter(
-      (p) => p.version && p.status !== "must-use",
-    );
-
-    // Collect unique slugs
-    const slugs: string[] = [...new Set(activePlugins.map((p) => p.slug))];
-
-    // Fetch vulnerability data for each slug
-    const vulnsBySlug: Map<string, WPVulnEntry[]> = new Map();
-    const batchSize = 5;
-
-    for (let i = 0; i < slugs.length; i += batchSize) {
-      const batch = slugs.slice(i, i + batchSize);
-      const results = await Promise.all(
-        batch.map(async (slug: string) => ({
-          slug,
-          vulns: await fetchPluginVulns(slug),
-        })),
-      );
-      for (const { slug, vulns } of results) {
-        if (vulns.length > 0) vulnsBySlug.set(slug, vulns);
-      }
-      if (i + batchSize < slugs.length) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
-    }
-
-    // Match vulnerabilities to installed plugins
+    // Match vulnerabilities to installed plugins and themes
     let vulnsFound = 0;
     let newVulns = 0;
-
-    for (const plugin of activePlugins) {
-      const slugVulns = vulnsBySlug.get(plugin.slug);
-      if (!slugVulns) continue;
-
-      const matching = slugVulns.filter((vuln) =>
-        isVersionAffected(plugin.version, vuln.operator),
-      );
-
-      for (const vuln of matching) {
-        try {
-          const cveSource = vuln.source.find((s) => s.id.startsWith("CVE-"));
-          const cveId = cveSource?.id;
-          const description =
-            cveSource?.description ||
-            vuln.source.find((s) => s.description)?.description ||
-            vuln.description;
-          const { severity, score } = severityFromImpact(vuln.impact);
-          const fixedInVersion =
-            vuln.operator.unfixed === "0" && vuln.operator.max_version
-              ? vuln.operator.max_version
-              : undefined;
-          const sourceUrl =
-            vuln.source.find((s) => s.link.includes("wordfence.com"))?.link ||
-            vuln.source.find((s) => s.link.includes("patchstack.com"))?.link ||
-            cveSource?.link ||
-            vuln.source[0]?.link;
-          const title = vuln.name
-            .replace(/&#8211;/g, "–")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/&amp;/g, "&")
-            .replace(/&#8217;/g, "'");
-
-          const result = await ctx.runMutation(
-            internal.vulnerabilities.upsert,
-            {
-              siteId: args.siteId,
-              pluginSlug: plugin.slug,
-              pluginVersion: plugin.version,
-              cveId,
-              title: title.substring(0, 200),
-              severity,
-              cvssScore: score,
-              description: description
-                ? description.substring(0, 1000)
-                : undefined,
-              fixedInVersion,
-              source: "wpvulnerability",
-              sourceUrl,
-            },
-          );
-          vulnsFound++;
-          if (result.isNew) newVulns++;
-        } catch (e) {
-          console.error("Rescan upsert error:", e);
-        }
-      }
+    for (const c of components) {
+      const r = await recordComponentVulns(ctx, args.siteId, c, vulnsByKey);
+      vulnsFound += r.found;
+      newVulns += r.added;
     }
 
     // Auto-resolve patched vulnerabilities for this site
@@ -481,11 +420,13 @@ export const rescanSite = action({
       { siteId: args.siteId },
     ) as any;
 
+    const pluginsChecked = unique.filter((c) => c.type === "plugin").length;
     return {
       vulnsFound,
       newVulns,
       resolved: resolveResult.resolved,
-      pluginsChecked: slugs.length,
+      pluginsChecked,
+      themesChecked: unique.length - pluginsChecked,
     };
   },
 });
@@ -500,6 +441,7 @@ export const notifySlack = internalAction({
     const unnotified: Array<{
       _id: string;
       siteId: string;
+      componentType?: "plugin" | "theme";
       pluginSlug: string;
       pluginVersion?: string;
       cveId?: string;
@@ -543,7 +485,7 @@ export const notifySlack = internalAction({
       for (const v of critical.slice(0, 5)) {
         const domain = siteDomains[v.siteId as string] || "Unknown";
         lines.push(
-          `  • ${v.title} — *${domain}* (${v.pluginSlug} ${v.pluginVersion || ""})${v.fixedInVersion ? ` → Update to ${v.fixedInVersion}` : ""}`,
+          `  • ${v.title} — *${domain}* (${v.componentType === "theme" ? "theme " : ""}${v.pluginSlug} ${v.pluginVersion || ""})${v.fixedInVersion ? ` → Update to ${v.fixedInVersion}` : ""}`,
         );
       }
       if (critical.length > 5)
@@ -556,7 +498,7 @@ export const notifySlack = internalAction({
       for (const v of high.slice(0, 5)) {
         const domain = siteDomains[v.siteId as string] || "Unknown";
         lines.push(
-          `  • ${v.title} — *${domain}* (${v.pluginSlug} ${v.pluginVersion || ""})`,
+          `  • ${v.title} — *${domain}* (${v.componentType === "theme" ? "theme " : ""}${v.pluginSlug} ${v.pluginVersion || ""})`,
         );
       }
       if (high.length > 5) lines.push(`  …and ${high.length - 5} more`);

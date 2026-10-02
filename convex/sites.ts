@@ -24,6 +24,7 @@ const siteReturnValidator = v.object({
   phpCheckedAt: v.optional(v.number()),
   wpVersion: v.optional(v.string()),
   wpUpdateAvailable: v.optional(v.boolean()),
+  wpUpdateVersion: v.optional(v.string()),
   sslEnabled: v.optional(v.boolean()),
   lastSyncedAt: v.optional(v.number()),
   securityScore: v.optional(v.number()),
@@ -149,6 +150,7 @@ export const upsert = internalMutation({
     phpVersion: v.optional(v.string()),
     wpVersion: v.optional(v.string()),
     wpUpdateAvailable: v.optional(v.boolean()),
+    wpUpdateVersion: v.optional(v.string()),
     sslEnabled: v.optional(v.boolean()),
     securityScore: v.optional(v.number()),
     securityGrade: gradeValidator,
@@ -183,7 +185,11 @@ export const upsert = internalMutation({
       if (args.stagingSiteId !== undefined) patch.stagingSiteId = args.stagingSiteId ?? undefined;
       if (args.phpVersion !== undefined) patch.phpVersion = args.phpVersion;
       if (args.wpVersion !== undefined) patch.wpVersion = args.wpVersion;
-      if (args.wpUpdateAvailable !== undefined) patch.wpUpdateAvailable = args.wpUpdateAvailable;
+      if (args.wpUpdateAvailable !== undefined) {
+        patch.wpUpdateAvailable = args.wpUpdateAvailable;
+        // undefined clears a stale version once the site is up to date
+        patch.wpUpdateVersion = args.wpUpdateAvailable ? args.wpUpdateVersion : undefined;
+      }
       if (args.sslEnabled !== undefined) patch.sslEnabled = args.sslEnabled;
       if (args.securityScore !== undefined) patch.securityScore = args.securityScore;
       if (args.securityGrade !== undefined) patch.securityGrade = args.securityGrade;
@@ -213,6 +219,7 @@ export const upsert = internalMutation({
       phpVersion: args.phpVersion,
       wpVersion: args.wpVersion,
       wpUpdateAvailable: args.wpUpdateAvailable,
+      wpUpdateVersion: args.wpUpdateVersion,
       sslEnabled: args.sslEnabled,
       securityScore: args.securityScore,
       securityGrade: args.securityGrade,

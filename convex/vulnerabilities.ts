@@ -1,3 +1,4 @@
+import { componentType } from "./schema";
 import { recalcSiteScore } from "./securityScore";
 /**
  * Vulnerability alerts — queries, mutations, and scanning actions.
@@ -28,6 +29,7 @@ const vulnReturnValidator = v.object({
   _id: v.id("vulnerabilities"),
   _creationTime: v.number(),
   siteId: v.id("sites"),
+  componentType: v.optional(componentType),
   pluginSlug: v.string(),
   pluginVersion: v.optional(v.string()),
   cveId: v.optional(v.string()),
@@ -170,6 +172,8 @@ export const bySite = query({
 export const upsert = internalMutation({
   args: {
     siteId: v.id("sites"),
+    // Omitted = plugin. For themes, pluginSlug/pluginVersion hold the theme's.
+    componentType: v.optional(componentType),
     pluginSlug: v.string(),
     pluginVersion: v.optional(v.string()),
     cveId: v.optional(v.string()),
@@ -183,13 +187,17 @@ export const upsert = internalMutation({
   },
   returns: v.object({ id: v.id("vulnerabilities"), isNew: v.boolean() }),
   handler: async (ctx, args) => {
-    // Check for existing vulnerability for this site+plugin+cve
-    const existing = await ctx.db
-      .query("vulnerabilities")
-      .withIndex("by_site_plugin", (q) =>
-        q.eq("siteId", args.siteId).eq("pluginSlug", args.pluginSlug),
-      )
-      .collect();
+    // Check for existing vulnerability for this site+component+cve. A theme
+    // and a plugin can share a slug, so match the component type too.
+    const type = args.componentType ?? "plugin";
+    const existing = (
+      await ctx.db
+        .query("vulnerabilities")
+        .withIndex("by_site_plugin", (q) =>
+          q.eq("siteId", args.siteId).eq("pluginSlug", args.pluginSlug),
+        )
+        .collect()
+    ).filter((v) => (v.componentType ?? "plugin") === type);
 
     const match = existing.find(
       (v) => v.cveId === args.cveId || (!v.cveId && !args.cveId && v.title === args.title),
@@ -213,6 +221,7 @@ export const upsert = internalMutation({
     // Create new
     const id = await ctx.db.insert("vulnerabilities", {
       siteId: args.siteId,
+      ...(type === "theme" ? { componentType: "theme" as const } : {}),
       pluginSlug: args.pluginSlug,
       pluginVersion: args.pluginVersion,
       cveId: args.cveId,
@@ -337,7 +346,7 @@ export const listUnnotified = internalQuery({
   },
 });
 
-// Auto-patch: mark vulns as patched when the plugin is updated past the fixed version
+// Auto-patch: mark vulns as patched when the plugin/theme is updated past the fixed version
 export const autoResolvePatched = internalMutation({
   args: { siteId: v.id("sites") },
   returns: v.object({ resolved: v.number() }),
@@ -353,12 +362,19 @@ export const autoResolvePatched = internalMutation({
       .query("sitePlugins")
       .withIndex("by_site", (q) => q.eq("siteId", args.siteId))
       .collect();
+    const themes = await ctx.db
+      .query("siteThemes")
+      .withIndex("by_site", (q) => q.eq("siteId", args.siteId))
+      .collect();
 
     let resolved = 0;
     for (const vuln of openVulns) {
-      const plugin = plugins.find((p) => p.slug === vuln.pluginSlug);
-      if (plugin?.version && vuln.fixedInVersion) {
-        if (compareVersions(plugin.version, vuln.fixedInVersion) >= 0) {
+      const installed =
+        vuln.componentType === "theme"
+          ? themes.find((t) => t.slug === vuln.pluginSlug)
+          : plugins.find((p) => p.slug === vuln.pluginSlug);
+      if (installed?.version && vuln.fixedInVersion) {
+        if (compareVersions(installed.version, vuln.fixedInVersion) >= 0) {
           await ctx.db.patch(vuln._id, {
             status: "patched",
             resolvedAt: Date.now(),
